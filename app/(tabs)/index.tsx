@@ -14,11 +14,11 @@ export default function MapScreen() {
 
   return (
     <GestureHandlerRootView style={styles.container}>
-      <MapLibreGL.MapView style={styles.map} styleURL={MAPTILER_STYLE_URL}>
+      <MapLibreGL.MapView style={styles.map} mapStyle={MAPTILER_STYLE_URL}>
         <MapLibreGL.Camera
           zoomLevel={12}
           centerCoordinate={RIO_DE_JANEIRO}
-          animationMode="none"
+          animationMode="moveTo"
         />
       </MapLibreGL.MapView>
 
