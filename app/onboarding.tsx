@@ -3,17 +3,20 @@ import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import { useRef, useState } from 'react';
 import {
+  Animated,
   Dimensions,
-  FlatList,
-  Image,
   ImageBackground,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  ViewToken,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+
+import AnimatedGradient from '@/components/AnimatedGradient';
 
 const { width, height } = Dimensions.get('window');
 
@@ -32,8 +35,8 @@ const STEPS: Step[] = [
   {
     id: 'splash',
     title: 'Salva\nrota',
-    body: 'Providing you with the safest route when you walk from A to B',
-    buttonLabel: 'N E X T',
+    body: 'O caminho mais seguro de A a B.',
+    buttonLabel: 'C O M E Ç A R',
   },
   {
     id: 'location-why',
@@ -45,7 +48,7 @@ const STEPS: Step[] = [
     id: 'location-permission',
     title: 'Permitir acesso\nà localização',
     body: 'Toque em "Permitir" na próxima tela. Usamos sua localização apenas enquanto você navega pelo app.',
-    buttonLabel: 'A T I V A R  L O C A L I Z A Ç Ã O',
+    buttonLabel: 'ATIVAR\nLOCALIZAÇÃO',
   },
   {
     id: 'data-sources',
@@ -65,15 +68,19 @@ const STEPS: Step[] = [
 
 const DATA_SOURCES = [
   { emoji: '🦸', label: 'Histórico de crimes', source: 'ISP Rio / SSP-RJ', tag: 'Atualizado mensalmente', tagColor: '#c8e1e6' },
-  { emoji: '🏪', label: 'Comércios abertos', source: 'OpenStreetMap', tag: 'Tempo real', tagColor: '#c1eccf' },
-  { emoji: '💡', label: 'Iluminação pública', source: 'Google Places API', tag: 'Cobertura parcial', tagColor: '#b2b683' },
+  { emoji: '🏪', label: 'Comércios abertos', source: 'OpenStreetMap', tag: 'Tempo\nreal', tagColor: '#c1eccf' },
+  { emoji: '💡', label: 'Iluminação pública', source: 'Google Places API', tag: 'Cobertura\nparcial', tagColor: '#b2b683' },
   { emoji: '🕐', label: 'Horário atual', source: 'Relógio do dispositivo', tag: 'Automático', tagColor: '#c8e1e6' },
 ];
+
+function Emoji({ children }: { children: string }) {
+  return <Text style={styles.emojiText}>{children}</Text>;
+}
 
 function DataSourceCard({ emoji, label, source, tag, tagColor }: typeof DATA_SOURCES[0]) {
   return (
     <View style={styles.dataCard}>
-      <Text style={styles.dataEmoji}>{emoji}</Text>
+      <Emoji>{emoji}</Emoji>
       <View style={styles.dataTextBlock}>
         <Text style={styles.dataLabel}>{label}</Text>
         <Text style={styles.dataSource}>{source}</Text>
@@ -88,7 +95,7 @@ function DataSourceCard({ emoji, label, source, tag, tagColor }: typeof DATA_SOU
 function WarningCard({ emoji, bold, text }: { emoji: string; bold: string; text: string }) {
   return (
     <View style={styles.dataCard}>
-      <Text style={styles.dataEmoji}>{emoji}</Text>
+      <Emoji>{emoji}</Emoji>
       <View style={{ flex: 1 }}>
         <Text style={styles.warningText}>
           <Text style={styles.warningBold}>{bold}</Text>
@@ -99,58 +106,67 @@ function WarningCard({ emoji, bold, text }: { emoji: string; bold: string; text:
   );
 }
 
-function Dots({ total, active }: { total: number; active: number }) {
-  return (
-    <View style={styles.dots}>
-      {Array.from({ length: total }).map((_, i) => (
-        <View key={i} style={[styles.dot, i === active && styles.dotActive]} />
-      ))}
-    </View>
-  );
-}
-
 export default function OnboardingScreen() {
+  const scrollRef = useRef<ScrollView>(null);
+  const scrollX = useRef(new Animated.Value(0)).current;
   const [currentIndex, setCurrentIndex] = useState(0);
-  const flatListRef = useRef<FlatList>(null);
 
-  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
-    if (viewableItems.length > 0 && viewableItems[0].index !== null) {
-      setCurrentIndex(viewableItems[0].index);
-    }
-  }).current;
+  const photoOpacity = scrollX.interpolate({
+    inputRange: [0, width * 0.8],
+    outputRange: [1, 0],
+    extrapolate: 'clamp',
+  });
+
+  function goTo(index: number) {
+    scrollRef.current?.scrollTo({ x: index * width, animated: true });
+  }
+
+  function handleDotPress() {
+    if (currentIndex < STEPS.length - 1) goTo(currentIndex + 1);
+  }
 
   async function handleNext(step: Step) {
     if (step.id === 'location-permission') {
       await Location.requestForegroundPermissionsAsync();
     }
-
     if (currentIndex < STEPS.length - 1) {
-      flatListRef.current?.scrollToIndex({ index: currentIndex + 1, animated: true });
+      goTo(currentIndex + 1);
     } else {
       await AsyncStorage.setItem('onboarding_done', 'true');
       router.replace('/(tabs)');
     }
   }
 
+  function handleScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {
+    const index = Math.round(e.nativeEvent.contentOffset.x / width);
+    setCurrentIndex(index);
+  }
+
   return (
     <View style={styles.container}>
-      <FlatList
-        ref={flatListRef}
-        data={STEPS}
-        keyExtractor={(item) => item.id}
+      {/* Fixed backgrounds */}
+      <AnimatedGradient />
+      <Animated.View style={[StyleSheet.absoluteFill, { opacity: photoOpacity }]}>
+        <ImageBackground source={{ uri: BG_IMAGE }} style={StyleSheet.absoluteFill} blurRadius={4}>
+          <View style={styles.overlay} />
+        </ImageBackground>
+      </Animated.View>
+
+      {/* Sliding content only */}
+      <Animated.ScrollView
+        ref={scrollRef as any}
         horizontal
         pagingEnabled
-        scrollEnabled={false}
         showsHorizontalScrollIndicator={false}
-        onViewableItemsChanged={onViewableItemsChanged}
-        viewabilityConfig={{ viewAreaCoveragePercentThreshold: 50 }}
-        renderItem={({ item }) => (
-          <ImageBackground
-            source={{ uri: BG_IMAGE }}
-            style={styles.slide}
-            blurRadius={4}
-          >
-            <View style={styles.overlay} />
+        scrollEventThrottle={16}
+        onScroll={Animated.event(
+          [{ nativeEvent: { contentOffset: { x: scrollX } } }],
+          { useNativeDriver: true, listener: handleScroll }
+        )}
+        style={{ flex: 1 }}
+      >
+        {STEPS.map((item) => (
+          <View key={item.id} style={styles.page}>
             <SafeAreaView style={styles.safeArea}>
 
               {item.id === 'splash' ? (
@@ -192,16 +208,28 @@ export default function OnboardingScreen() {
               )}
 
               <View style={styles.footer}>
-                {item.id !== 'splash' && <Dots total={STEPS.length - 1} active={currentIndex - 1} />}
-                <TouchableOpacity onPress={() => handleNext(item)} style={styles.button} activeOpacity={0.7}>
+                {item.id !== 'splash' && (
+                  <View style={styles.dots}>
+                    {STEPS.slice(1).map((_, i) => (
+                      <TouchableOpacity key={i} onPress={handleDotPress} hitSlop={10}>
+                        <View style={[styles.dot, i === currentIndex - 1 && styles.dotActive]} />
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+                <TouchableOpacity
+                  onPress={() => handleNext(item)}
+                  style={styles.button}
+                  activeOpacity={0.7}
+                >
                   <Text style={styles.buttonText}>{item.buttonLabel}</Text>
                 </TouchableOpacity>
               </View>
 
             </SafeAreaView>
-          </ImageBackground>
-        )}
-      />
+          </View>
+        ))}
+      </Animated.ScrollView>
     </View>
   );
 }
@@ -209,15 +237,15 @@ export default function OnboardingScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#33302C',
-  },
-  slide: {
-    width,
-    height,
+    backgroundColor: '#2A231C',
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(42, 35, 28, 0.72)',
+  },
+  page: {
+    width,
+    height,
   },
   safeArea: {
     flex: 1,
@@ -225,6 +253,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 40,
     paddingBottom: 40,
   },
+
+  // Splash
   splashTitleBlock: {
     position: 'absolute',
     right: 40,
@@ -244,6 +274,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 2,
   },
+
+  // Inner screens
   title: {
     color: '#fff',
     fontSize: 20,
@@ -267,6 +299,8 @@ const styles = StyleSheet.create({
     right: 40,
     width: 257,
   },
+
+  // Data source cards
   cardsBlock: {
     gap: 12,
     marginBottom: 32,
@@ -280,10 +314,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     gap: 12,
   },
-  dataEmoji: {
+  emojiText: {
     fontSize: 20,
     width: 32,
     textAlign: 'center',
+    fontFamily: undefined,
   },
   dataTextBlock: {
     flex: 1,
@@ -321,6 +356,11 @@ const styles = StyleSheet.create({
     color: '#b9b8b8',
     fontWeight: '400',
   },
+
+  // Footer
+  footer: {
+    alignItems: 'center',
+  },
   dots: {
     flexDirection: 'row',
     justifyContent: 'center',
@@ -337,9 +377,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     width: 20,
   },
-  footer: {
-    alignItems: 'center',
-  },
   button: {
     paddingVertical: 16,
     width: '100%',
@@ -349,5 +386,6 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     letterSpacing: 4,
+    textAlign: 'center',
   },
 });
