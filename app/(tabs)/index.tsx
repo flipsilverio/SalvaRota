@@ -78,19 +78,25 @@ export default function MapScreen() {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') return;
 
+      async function applyReverseGeocode(coords: Location.LocationObjectCoords) {
+        const results = await Location.reverseGeocodeAsync(coords);
+        if (results.length > 0) {
+          const r     = results[0];
+          const parts = [r.street, r.streetNumber].filter(Boolean);
+          setAddress(parts.length > 0
+            ? parts.join(', ')
+            : r.district ?? r.city ?? 'Localização atual'
+          );
+        }
+      }
+
+      // Immediately resolve the current position so the address is correct on mount
+      const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      await applyReverseGeocode(current.coords);
+
       subscriber = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.Balanced, distanceInterval: 20 },
-        async (loc) => {
-          const results = await Location.reverseGeocodeAsync(loc.coords);
-          if (results.length > 0) {
-            const r     = results[0];
-            const parts = [r.street, r.streetNumber].filter(Boolean);
-            setAddress(parts.length > 0
-              ? parts.join(', ')
-              : r.district ?? r.city ?? 'Localização atual'
-            );
-          }
-        }
+        (loc) => applyReverseGeocode(loc.coords),
       );
     })();
     return () => { subscriber?.remove(); };
