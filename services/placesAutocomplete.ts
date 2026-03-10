@@ -39,11 +39,14 @@ export async function fetchAutocompleteSuggestions(
     language:     'pt-BR',
     components:   'country:br',
     sessiontoken: sessionToken,
-    types:        'geocode|establishment',
+    types:        'geocode',
   });
 
+  const controller = new AbortController();
+  const timer      = setTimeout(() => controller.abort(), 6000);
+
   try {
-    const res  = await fetch(`${BASE_AUTOCOMPLETE}?${params}`, { signal: AbortSignal.timeout(6000) });
+    const res  = await fetch(`${BASE_AUTOCOMPLETE}?${params}`, { signal: controller.signal });
     const data = await res.json();
 
     if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
@@ -60,6 +63,8 @@ export async function fetchAutocompleteSuggestions(
   } catch (err) {
     console.warn('[Autocomplete] fetch error:', err);
     return [];
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -85,8 +90,11 @@ export async function fetchPlaceDetails(
     sessiontoken: sessionToken,
   });
 
+  const controller = new AbortController();
+  const timer      = setTimeout(() => controller.abort(), 6000);
+
   try {
-    const res  = await fetch(`${BASE_DETAILS}?${params}`, { signal: AbortSignal.timeout(6000) });
+    const res  = await fetch(`${BASE_DETAILS}?${params}`, { signal: controller.signal });
     const data = await res.json();
 
     if (data.status !== 'OK') {
@@ -105,5 +113,7 @@ export async function fetchPlaceDetails(
   } catch (err) {
     console.warn('[Place Details] fetch error:', err);
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
