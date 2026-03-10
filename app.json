@@ -10,9 +10,10 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.salvarota"
+      "bundleIdentifier": "com.salvarota.app"
     },
     "android": {
+      "package": "com.salvarota.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -27,6 +28,7 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
+      "expo-dev-client",
       "expo-router",
       "@maplibre/maplibre-react-native",
       [
