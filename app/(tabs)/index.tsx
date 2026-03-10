@@ -17,7 +17,7 @@ import AddressSearch, { SelectedPlace } from '../../components/AddressSearch';
 
 MapLibreGL.setAccessToken(null);
 
-const RIO_DE_JANEIRO     = [-43.1729, -22.9068];
+const IPANEMA_BEACH      = [-43.1873, -22.9868];
 const MAPTILER_STYLE_URL = `https://api.maptiler.com/maps/019cd357-6ec6-7605-9d2c-637be3bc2c81/style.json?key=${process.env.EXPO_PUBLIC_MAPTILER_API_KEY}`;
 const API_URL            = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000';
 
@@ -181,7 +181,7 @@ export default function MapScreen() {
       >
         <MapLibreGL.Camera
           ref={cameraRef}
-          defaultSettings={{ centerCoordinate: RIO_DE_JANEIRO, zoomLevel: 12 }}
+          defaultSettings={{ centerCoordinate: IPANEMA_BEACH, zoomLevel: 14 }}
           followUserLocation={following}
           followZoomLevel={16}
         />
