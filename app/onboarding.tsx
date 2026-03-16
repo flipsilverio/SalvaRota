@@ -15,6 +15,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { MaterialIcons } from '@expo/vector-icons';
 
 import AnimatedGradient from '@/components/AnimatedGradient';
 
@@ -67,20 +68,24 @@ const STEPS: Step[] = [
 ];
 
 const DATA_SOURCES = [
-  { emoji: '🦸', label: 'Histórico de crimes', source: 'ISP Rio / SSP-RJ', tag: 'Atualizado mensalmente', tagColor: '#c8e1e6' },
-  { emoji: '🏪', label: 'Comércios abertos', source: 'OpenStreetMap', tag: 'Tempo\nreal', tagColor: '#c1eccf' },
-  { emoji: '💡', label: 'Iluminação pública', source: 'Google Places API', tag: 'Cobertura\nparcial', tagColor: '#b2b683' },
-  { emoji: '🕐', label: 'Horário atual', source: 'Relógio do dispositivo', tag: 'Automático', tagColor: '#c8e1e6' },
+  { emoji: 'security',         label: 'Histórico de crimes',   source: 'ISP Rio / SSP-RJ',          tag: 'Atualizado mensalmente', tagColor: '#c8e1e6' },
+  { emoji: 'storefront',       label: 'Comércios abertos',     source: 'OpenStreetMap',             tag: 'Tempo\nreal',            tagColor: '#c1eccf' },
+  { emoji: 'wb-incandescent',  label: 'Iluminação pública',    source: 'Google Places API',         tag: 'Cobertura\nparcial',    tagColor: '#b2b683' },
+  { emoji: 'schedule',         label: 'Horário atual',         source: 'Relógio do dispositivo',    tag: 'Automático',            tagColor: '#c8e1e6' },
 ];
 
-function Emoji({ children }: { children: string }) {
-  return <Text style={styles.emojiText}>{children}</Text>;
+function Emoji({ name }: { name: string }) {
+  return (
+    <View style={styles.emojiWrapper}>
+      <MaterialIcons name={name as any} size={22} color="#fff" />
+    </View>
+  );
 }
 
 function DataSourceCard({ emoji, label, source, tag, tagColor }: typeof DATA_SOURCES[0]) {
   return (
     <View style={styles.dataCard}>
-      <Emoji>{emoji}</Emoji>
+      <Emoji name={emoji} />
       <View style={styles.dataTextBlock}>
         <Text style={styles.dataLabel}>{label}</Text>
         <Text style={styles.dataSource}>{source}</Text>
@@ -95,7 +100,7 @@ function DataSourceCard({ emoji, label, source, tag, tagColor }: typeof DATA_SOU
 function WarningCard({ emoji, bold, text }: { emoji: string; bold: string; text: string }) {
   return (
     <View style={styles.dataCard}>
-      <Emoji>{emoji}</Emoji>
+      <Emoji name={emoji} />
       <View style={{ flex: 1 }}>
         <Text style={styles.warningText}>
           <Text style={styles.warningBold}>{bold}</Text>
@@ -195,12 +200,12 @@ export default function OnboardingScreen() {
               {item.content === 'warnings' && (
                 <View style={styles.cardsBlock}>
                   <WarningCard
-                    emoji="⚠️"
+                    emoji="warning-amber"
                     bold="Atenção: "
                     text="O SalvaRota oferece orientações baseadas em dados, mas não garante sua segurança em nenhuma circunstância. Use o bom senso sempre."
                   />
                   <WarningCard
-                    emoji="🚶"
+                    emoji="directions-walk"
                     bold="Dica importante: "
                     text="Evite andar com o celular na mão. A maioria dos roubos acontece quando o aparelho está visível. Consulte a rota antes de sair, guarde o celular e siga em frente."
                   />
@@ -314,11 +319,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     gap: 12,
   },
-  emojiText: {
-    fontSize: 20,
+  emojiWrapper: {
     width: 32,
-    textAlign: 'center',
-    fontFamily: undefined,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   dataTextBlock: {
     flex: 1,

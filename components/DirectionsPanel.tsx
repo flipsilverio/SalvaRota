@@ -1,5 +1,5 @@
 import { MaterialIcons } from '@expo/vector-icons';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -9,6 +9,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  ViewStyle,
 } from 'react-native';
 import {
   fetchAutocompleteSuggestions,
@@ -31,6 +32,8 @@ interface Props {
   /** Swap From ↔ To */
   onSwap: () => void;
   onClose: () => void;
+  /** Override wrapper position (e.g. { top: insets.top + 12 }) */
+  style?: ViewStyle;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -48,6 +51,7 @@ export default function DirectionsPanel({
   onToChange,
   onSwap,
   onClose,
+  style,
 }: Props) {
   const [activeField, setActiveField] = useState<ActiveField>(null);
   const [fromText, setFromText]       = useState(fromAddress);
@@ -58,6 +62,10 @@ export default function DirectionsPanel({
 
   const sessionToken = useRef(generateToken());
   const debounce     = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Sync text fields when parent swaps or updates addresses
+  useEffect(() => { setFromText(fromAddress); }, [fromAddress]);
+  useEffect(() => { setToText(toAddress); }, [toAddress]);
 
   // ── Autocomplete ─────────────────────────────────────────────────────────
 
@@ -119,7 +127,7 @@ export default function DirectionsPanel({
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <View style={styles.wrapper}>
+    <View style={[styles.wrapper, style]}>
 
       {/* ── Panel card ── */}
       <View style={styles.panel}>

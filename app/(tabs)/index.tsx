@@ -14,6 +14,9 @@ import {
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AddressSearch, { SelectedPlace } from '../../components/AddressSearch';
+import DirectionsPanel from '../../components/DirectionsPanel';
+import RouteLayer from '../../components/RouteLayer';
+import { fetchWalkingRoute } from '../../services/directionsService';
 
 MapLibreGL.setAccessToken(null);
 
@@ -26,11 +29,14 @@ const SCORE_AMBER = '#E8A838';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+type UIMode = 'idle' | 'place_selected' | 'directions';
+
 interface RouteMetrics {
-  score:         number;
-  crimeTotal:    number;   // sum of crime_incidents across all segments
-  lightingAvg:   number;   // average lighting_score (0–100)
-  businessesAvg: number;   // average open_businesses per segment
+  score:          number | null;
+  crimeTotal:     number;
+  lightingAvg:    number | null;
+  businessesAvg:  number | null;
+  routesCompared: number; // how many alternative routes were scored
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -41,19 +47,58 @@ function getScoreStyle(score: number): { label: string; color: string } {
   return              { label: 'Perigoso', color: '#E05252' };
 }
 
+/**
+ * Time-of-day safety indicator based on the device clock.
+ *
+ * Buckets derived from ISP Rio crime statistics and peer-reviewed research:
+ *   - ISP Rio (2023): ~38 % of street robberies occur between 14:00–19:00
+ *   - Bernasco et al. (2017): nocturnal peak 20:00–00:00 across urban centres
+ *   - Uttley & Fotios (2017): darkness multiplies robbery risk ~1.5×
+ *   - Tompson & Bowers (2013): early-morning hours show sharp crime drop
+ *
+ * 05:00–09:00 → green  — low pedestrian targets; commuter rush still safe
+ * 09:00–14:00 → amber  — moderate daytime activity
+ * 14:00–19:00 → red    — Rio afternoon robbery peak (~38 % of incidents)
+ * 19:00–03:00 → red    — primary nocturnal peak + bar-closing cluster
+ * 03:00–05:00 → amber  — deep night; very few targets, crime recedes
+ */
+function getTimeInfo(): { value: string; color: string } {
+  const now  = new Date();
+  const h    = now.getHours();
+  const time = `${String(h).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+  if (h >= 5  && h < 9)  return { value: time, color: '#5BAD6F' };   // early morning, safe
+  if (h >= 9  && h < 14) return { value: time, color: SCORE_AMBER }; // mid-morning to midday
+  if (h >= 14 && h < 19) return { value: time, color: '#E05252' };   // ISP Rio afternoon peak
+  if (h >= 19)           return { value: time, color: '#E05252' };   // nocturnal peak
+  if (h < 3)             return { value: time, color: '#E05252' };   // bar-closing cluster
+  return                         { value: time, color: SCORE_AMBER }; // 03:00–05:00, risk recedes
+}
+
 function extractMetrics(data: any, recommendedId: number): RouteMetrics | null {
   const route = data.routes?.find((r: any) => r.route_id === recommendedId);
   if (!route || !route.segments?.length) return null;
 
-  const segs  = route.segments as any[];
-  const count = segs.length;
-  const sum   = (key: string) => segs.reduce((acc: number, s: any) => acc + (s[key] ?? 0), 0);
+  const segs = route.segments as any[];
+
+  const crimeTotal = segs.reduce((acc: number, s: any) => acc + (s.crime_incidents ?? 0), 0);
+
+  const litSegs = segs.filter((s: any) => s.lighting_score !== null && s.lighting_score !== undefined);
+  const lightingAvg = litSegs.length > 0
+    ? Math.round(litSegs.reduce((acc: number, s: any) => acc + s.lighting_score, 0) / litSegs.length)
+    : null;
+
+  const bizSegs = segs.filter((s: any) => s.open_businesses !== null && s.open_businesses !== undefined);
+  const businessesAvg = bizSegs.length > 0
+    ? Math.round(bizSegs.reduce((acc: number, s: any) => acc + s.open_businesses, 0) / bizSegs.length)
+    : null;
 
   return {
-    score:         Math.round(route.score),
-    crimeTotal:    Math.round(sum('crime_incidents')),
-    lightingAvg:   Math.round(sum('lighting_score')    / count),
-    businessesAvg: Math.round(sum('open_businesses')   / count),
+    score:          route.score !== null && route.score !== undefined ? Math.round(route.score) : null,
+    crimeTotal:     Math.round(crimeTotal),
+    lightingAvg,
+    businessesAvg,
+    routesCompared: data.routes?.length ?? 1,
   };
 }
 
@@ -64,9 +109,12 @@ export default function MapScreen() {
   const bottomSheetRef = useRef<BottomSheet>(null);
   const cameraRef      = useRef<CameraRef>(null);
 
+  const [uiMode, setUiMode]                 = useState<UIMode>('idle');
   const [following, setFollowing]           = useState(false);
   const [address, setAddress]               = useState('Localização atual');
+  const [fromPlace, setFromPlace]           = useState<SelectedPlace | null>(null);
   const [destination, setDestination]       = useState<SelectedPlace | null>(null);
+  const [routeCoords, setRouteCoords]       = useState<[number, number][]>([]);
   const [metrics, setMetrics]               = useState<RouteMetrics | null>(null);
   const [isLoadingRoute, setIsLoadingRoute] = useState(false);
   const [routeError, setRouteError]         = useState(false);
@@ -90,7 +138,6 @@ export default function MapScreen() {
         }
       }
 
-      // Immediately resolve the current position so the address is correct on mount
       const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       await applyReverseGeocode(current.coords);
 
@@ -109,70 +156,128 @@ export default function MapScreen() {
     setFollowing(true);
   }
 
-  // ── Destination picked → fetch safe route ─────────────────────────────────
+  // ── Destination picked from search ────────────────────────────────────────
   async function handlePlaceSelected(place: SelectedPlace) {
     setDestination(place);
     setFollowing(false);
     setRouteError(false);
     setMetrics(null);
+    setRouteCoords([]);
+    setUiMode('place_selected');
 
-    // Fly camera to destination
     cameraRef.current?.setCamera({
       centerCoordinate: [place.lng, place.lat],
       zoomLevel: 15,
       animationDuration: 900,
     });
 
-    // Open the bottom sheet
     bottomSheetRef.current?.snapToIndex(1);
 
-    // Resolve user's current position
+    // Pre-load backend metrics in background so they're ready when user taps "Como chegar"
     let originLat: number, originLng: number;
     try {
-      await Location.requestForegroundPermissionsAsync();
-      const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       originLat = loc.coords.latitude;
       originLng = loc.coords.longitude;
+      setFromPlace({ lat: originLat, lng: originLng, address });
     } catch {
+      console.warn('[Route] Could not get device location');
       setRouteError(true);
       return;
     }
 
-    // Call the SalvaRota backend
     setIsLoadingRoute(true);
+    // Use AbortController for broader RN compatibility
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 25_000);
     try {
-      const url = [
-        `${API_URL}/safe-route`,
-        `?origin_lat=${originLat}&origin_lng=${originLng}`,
-        `&dest_lat=${place.lat}&dest_lng=${place.lng}`,
-      ].join('');
-
-      const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-      if (!res.ok) { setRouteError(true); return; }
-
-      const data      = await res.json();
-      const extracted = extractMetrics(data, data.recommended_route);
-      setMetrics(extracted);
-    } catch (err) {
-      console.warn('[Route] fetch error:', err);
+      const url = `${API_URL}/safe-route?origin_lat=${originLat}&origin_lng=${originLng}&dest_lat=${place.lat}&dest_lng=${place.lng}`;
+      console.log('[Route] fetching', url);
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) {
+        console.warn('[Route] HTTP error', res.status);
+        setRouteError(true);
+        return;
+      }
+      const data = await res.json();
+      console.log('[Route] response recommended_route=', data.recommended_route,
+        'routes=', data.routes?.length, 'score=', data.routes?.[0]?.score);
+      const m = extractMetrics(data, data.recommended_route);
+      console.log('[Route] extracted metrics', JSON.stringify(m));
+      setMetrics(m);
+    } catch (err: any) {
+      console.warn('[Route] fetch error:', err?.message ?? err);
       setRouteError(true);
     } finally {
+      clearTimeout(timeoutId);
       setIsLoadingRoute(false);
     }
   }
 
-  // ── Search cleared ────────────────────────────────────────────────────────
+  // ── "Como chegar" — fetch geometry and switch to directions mode ──────────
+  async function handleGetDirections() {
+    if (!destination || !fromPlace) return;
+    setRouteError(false);
+    setRouteCoords([]);
+    setUiMode('directions');
+    bottomSheetRef.current?.snapToIndex(1);
+
+    const result = await fetchWalkingRoute(fromPlace, destination);
+    if (!result) {
+      setRouteError(true);
+      return;
+    }
+
+    setRouteCoords(result.coordinates);
+    cameraRef.current?.fitBounds(result.bounds.ne, result.bounds.sw, [80, 80, 280, 80], 800);
+  }
+
+  // ── DirectionsPanel callbacks ─────────────────────────────────────────────
+  async function handleFromChange(place: SelectedPlace) {
+    setFromPlace(place);
+    await refetchRoute(place, destination);
+  }
+
+  async function handleToChange(place: SelectedPlace) {
+    setDestination(place);
+    await refetchRoute(fromPlace, place);
+  }
+
+  function handleSwap() {
+    const prev = fromPlace;
+    setFromPlace(destination);
+    setDestination(prev);
+    refetchRoute(destination, prev);
+  }
+
+  async function refetchRoute(from: SelectedPlace | null, to: SelectedPlace | null) {
+    if (!from || !to) return;
+    setRouteCoords([]);
+    const result = await fetchWalkingRoute(from, to);
+    if (result) {
+      setRouteCoords(result.coordinates);
+      cameraRef.current?.fitBounds(result.bounds.ne, result.bounds.sw, [80, 80, 280, 80], 800);
+    }
+  }
+
+  // ── Back / clear ──────────────────────────────────────────────────────────
+  function handleDirectionsClose() {
+    setUiMode('place_selected');
+    setRouteCoords([]);
+  }
+
   function handleSearchClear() {
     setDestination(null);
+    setFromPlace(null);
     setMetrics(null);
     setRouteError(false);
+    setRouteCoords([]);
+    setUiMode('idle');
   }
 
   // ── Score display ─────────────────────────────────────────────────────────
-  const scoreStyle   = metrics ? getScoreStyle(metrics.score) : { label: 'Moderado', color: SCORE_AMBER };
-  const scoreDisplay = metrics ? metrics.score : 72;
+  const scoreStyle   = (metrics?.score != null) ? getScoreStyle(metrics.score) : { label: '–', color: '#BDBDBD' };
+  const scoreDisplay = metrics?.score ?? '–';
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -193,7 +298,10 @@ export default function MapScreen() {
         />
         <MapLibreGL.UserLocation visible renderMode={MapLibreGL.UserLocationRenderMode.Native} />
 
-        {/* Destination pin on map */}
+        {/* Route polyline — always mounted to avoid native layer teardown crash */}
+        <RouteLayer coordinates={routeCoords} />
+
+        {/* Destination pin */}
         {destination && (
           <MapLibreGL.PointAnnotation
             id="destination"
@@ -206,22 +314,36 @@ export default function MapScreen() {
         )}
       </MapLibreGL.MapView>
 
-      {/* Autocomplete search bar */}
-      <AddressSearch
-        style={{ top: top + 12 }}
-        onPlaceSelected={handlePlaceSelected}
-        onMenuPress={() => router.push('/menu' as any)}
-        onClear={handleSearchClear}
-      />
+      {/* Top bar — AddressSearch in idle/place_selected, DirectionsPanel in directions */}
+      {uiMode === 'directions' ? (
+        <DirectionsPanel
+          style={{ top: top + 12 }}
+          fromAddress={fromPlace?.address ?? address}
+          toAddress={destination?.address ?? ''}
+          onFromChange={handleFromChange}
+          onToChange={handleToChange}
+          onSwap={handleSwap}
+          onClose={handleDirectionsClose}
+        />
+      ) : (
+        <AddressSearch
+          style={{ top: top + 12 }}
+          onPlaceSelected={handlePlaceSelected}
+          onMenuPress={() => router.push('/menu' as any)}
+          onClear={handleSearchClear}
+        />
+      )}
 
       {/* Locate me */}
-      <TouchableOpacity
-        style={[styles.locateButton, following && styles.locateButtonActive]}
-        onPress={handleLocateMe}
-        activeOpacity={0.8}
-      >
-        <MaterialIcons name="my-location" size={22} color={following ? '#4A90D9' : '#666'} />
-      </TouchableOpacity>
+      {uiMode !== 'directions' && (
+        <TouchableOpacity
+          style={[styles.locateButton, following && styles.locateButtonActive]}
+          onPress={handleLocateMe}
+          activeOpacity={0.8}
+        >
+          <MaterialIcons name="my-location" size={22} color={following ? '#4A90D9' : '#666'} />
+        </TouchableOpacity>
+      )}
 
       {/* Bottom sheet */}
       <BottomSheet
@@ -237,7 +359,9 @@ export default function MapScreen() {
           <View style={styles.scoreRow}>
             <View style={styles.locationLabelRow}>
               <Text style={styles.locationLabel}>
-                {destination ? 'Destino selecionado' : 'Localização atual'}
+                {metrics
+                  ? `Melhor de ${metrics.routesCompared} rota${metrics.routesCompared !== 1 ? 's' : ''}`
+                  : destination ? 'Destino selecionado' : 'Localização atual'}
               </Text>
               <View style={[styles.scoreDot, { backgroundColor: scoreStyle.color }]} />
               <Text style={[styles.scoreText, { color: scoreStyle.color }]}>
@@ -271,54 +395,49 @@ export default function MapScreen() {
           ) : (
             <View style={styles.metricsGrid}>
 
-              {/* Crime — real data from API, dash if no route yet */}
-              <MetricRow
-                label="Crime"
-                value={
-                  metrics
-                    ? `${metrics.crimeTotal} incidente${metrics.crimeTotal !== 1 ? 's' : ''}`
-                    : '—'
-                }
-                color={
-                  metrics == null       ? '#AAA'
-                  : metrics.crimeTotal === 0 ? '#5BAD6F'
-                  : metrics.crimeTotal <= 5  ? SCORE_AMBER
-                  : '#E05252'
-                }
-              />
+              {/* Idle-mode hint — shown when no destination has been selected yet */}
+              {!destination && (
+                <Text style={styles.idleHint}>
+                  Busque um destino para ver as métricas de segurança da rota
+                </Text>
+              )}
 
-              {/* Iluminação — real data from API */}
               <MetricRow
                 label="Iluminação"
-                value={metrics ? `${metrics.lightingAvg} / 100` : '—'}
-                color={
-                  metrics == null              ? '#AAA'
-                  : metrics.lightingAvg >= 70  ? '#5BAD6F'
-                  : metrics.lightingAvg >= 40  ? SCORE_AMBER
-                  : '#E05252'
-                }
+                value={metrics?.lightingAvg != null ? `${metrics.lightingAvg} / 100` : null}
+                color={metrics?.lightingAvg != null ? getScoreStyle(metrics.lightingAvg).color : '#BDBDBD'}
               />
 
-              {/* Negócios — real data from API */}
               <MetricRow
-                label="Negócios"
-                value={
-                  metrics
-                    ? `${metrics.businessesAvg} aberto${metrics.businessesAvg !== 1 ? 's' : ''}`
-                    : '—'
-                }
-                color={
-                  metrics == null                ? '#AAA'
-                  : metrics.businessesAvg >= 6   ? '#5BAD6F'
-                  : metrics.businessesAvg >= 1   ? SCORE_AMBER
-                  : '#E05252'
-                }
+                label="Negócios abertos"
+                value={metrics?.businessesAvg != null ? `${metrics.businessesAvg} por trecho` : null}
+                color={SCORE_AMBER}
               />
 
-              {/* Hora — no time-based data from API, keep as placeholder */}
-              <MetricRow label="Hora" value="0.8" color="#4A90D9" />
+              <MetricRow
+                label="Crime"
+                value={metrics != null ? `${metrics.crimeTotal} nos últimos 90d` : null}
+                color={metrics?.crimeTotal === 0 ? '#5BAD6F' : '#E05252'}
+              />
+
+              {/* Hora — device clock, always shown */}
+              {(() => { const t = getTimeInfo(); return (
+                <MetricRow label="Hora" value={t.value} color={t.color} />
+              ); })()}
 
             </View>
+          )}
+
+          {/* CTA */}
+          {destination && uiMode !== 'directions' && (
+            <TouchableOpacity
+              style={styles.ctaButton}
+              activeOpacity={0.8}
+              onPress={handleGetDirections}
+            >
+              <MaterialIcons name="directions-walk" size={18} color="#1C1A18" />
+              <Text style={styles.ctaButtonText}>Como chegar</Text>
+            </TouchableOpacity>
           )}
 
         </BottomSheetView>
@@ -330,12 +449,15 @@ export default function MapScreen() {
 
 // ── MetricRow ─────────────────────────────────────────────────────────────────
 
-function MetricRow({ label, value, color }: { label: string; value: string; color: string }) {
+function MetricRow({ label, value, color }: { label: string; value: string | null; color: string }) {
+  const noData = value === null;
   return (
     <View style={styles.metricRow}>
-      <View style={[styles.metricDot, { backgroundColor: color }]} />
+      <View style={[styles.metricDot, { backgroundColor: noData ? '#BDBDBD' : color }]} />
       <Text style={styles.metricLabel}>{label}</Text>
-      <Text style={[styles.metricValue, { color }]}>{value}</Text>
+      <Text style={[styles.metricValue, { color: noData ? '#BDBDBD' : color }]}>
+        {noData ? '—' : value}
+      </Text>
     </View>
   );
 }
@@ -431,6 +553,13 @@ const styles = StyleSheet.create({
     color: '#AAA',
   },
 
+  idleHint: {
+    fontSize: 12,
+    color: 'rgba(0,0,0,0.38)',
+    marginBottom: 4,
+    lineHeight: 17,
+  },
+
   metricsGrid: { gap: 12 },
   metricRow: {
     flexDirection: 'row',
@@ -451,5 +580,26 @@ const styles = StyleSheet.create({
   metricValue: {
     fontSize: 13,
     fontWeight: '600',
+  },
+  ctaButton: {
+    marginTop: 20,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 999,
+    backgroundColor: SCORE_AMBER,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  ctaButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1C1A18',
   },
 });

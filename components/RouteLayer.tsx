@@ -22,15 +22,16 @@ const BORDER_STYLE = {
 };
 
 export default function RouteLayer({ coordinates }: Props) {
-  if (coordinates.length < 2) return null;
-
+  // Always keep ShapeSource/LineLayer mounted — unmounting native MapLibre
+  // layers while the map still holds references causes a crash on New Architecture.
+  // Use an empty FeatureCollection when there is no route yet.
   const shape = {
     type:     'FeatureCollection' as const,
-    features: [{
+    features: coordinates.length >= 2 ? [{
       type:       'Feature' as const,
       geometry:   { type: 'LineString' as const, coordinates },
       properties: {},
-    }],
+    }] : [],
   };
 
   return (
