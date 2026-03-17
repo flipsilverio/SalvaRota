@@ -149,13 +149,14 @@ function extractMetrics(data: any, recommendedId: number): RouteMetrics | null {
 }
 
 function buildRouteSegments(
-  coords:   [number, number][],
-  segments: BackendSegment[],
-  date:     Date = new Date(),
+  coords:     [number, number][],
+  segments:   BackendSegment[],
+  date:       Date = new Date(),
+  routeScore: number | null = null,
 ): RouteSegment[] {
   if (!segments.length || coords.length < 2) return [];
   const parts = splitCoordinates(coords, segments.length);
-  return parts.map((part, i) => ({
+  const built = parts.map((part, i) => ({
     coordinates: part,
     score: computeSegmentScore({
       lightingScore:  segments[i].lighting_score  ?? null,
@@ -164,6 +165,23 @@ function buildRouteSegments(
       date,
     }),
   }));
+
+  // Normalize client-side segment scores to anchor to the backend route score.
+  // The client formula can be overly optimistic during daytime (daylight/time
+  // scores dominate), producing all-green segments on a route the backend rates
+  // as moderate or dangerous. Scaling preserves relative risk between segments.
+  if (routeScore != null) {
+    const avg = built.reduce((sum, s) => sum + s.score, 0) / built.length;
+    if (avg > 0) {
+      const factor = routeScore / avg;
+      return built.map(s => ({
+        ...s,
+        score: Math.max(0, Math.min(100, Math.round(s.score * factor))),
+      }));
+    }
+  }
+
+  return built;
 }
 
 async function fetchSafeRouteMetrics(
@@ -369,7 +387,7 @@ export default function MapScreen() {
 
     const now = new Date();
     if (effectiveMetrics?.segments?.length) {
-      setRouteSegments(buildRouteSegments(route.coordinates, effectiveMetrics.segments, now));
+      setRouteSegments(buildRouteSegments(route.coordinates, effectiveMetrics.segments, now, effectiveMetrics.score ?? null));
       setRouteScore(effectiveMetrics.score ?? undefined);
     } else {
       setRouteSegments([]);
