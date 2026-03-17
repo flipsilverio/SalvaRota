@@ -166,6 +166,30 @@ function buildRouteSegments(
   }));
 }
 
+async function fetchSafeRouteMetrics(
+  from: SelectedPlace,
+  to:   SelectedPlace,
+): Promise<RouteMetrics | null> {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 25_000);
+  try {
+    const url = `${API_URL}/safe-route?origin_lat=${from.lat}&origin_lng=${from.lng}&dest_lat=${to.lat}&dest_lng=${to.lng}`;
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return extractMetrics(data, data.recommended_route);
+  } catch (err: any) {
+    if (err?.name !== 'AbortError') {
+      const now = new Date();
+      const clientScore = Math.round((timeSafetyScore(now) + daylightScore(now)) / 2);
+      return { score: clientScore, crimeTotal: 0, lightingAvg: null, businessesAvg: null, routesCompared: 1 };
+    }
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function pickBestRoute(
   routes:          RouteResult[],
   backendMetrics?: RouteMetrics | null,
@@ -328,18 +352,17 @@ export default function MapScreen() {
 
   /**
    * Fetches the Google walking route and renders it.
-   * Always starts with a grey (no-score) route and applies
-   * safety colours only once safetyMetrics is provided.
-   *
-   * Pass `safetyMetrics` explicitly so callers can supply
-   * fresh data (e.g. after a swap re-fetch) without relying
-   * on the React state closure which may still hold stale data.
+   * Clears stale segment colours immediately so the polyline shows grey
+   * while safety data is still loading. Pass `overrideMetrics` to supply
+   * fresh data without relying on the React state closure.
    */
   async function fetchAndDisplayRoute(
-    from:          SelectedPlace,
-    to:            SelectedPlace,
-    safetyMetrics: RouteMetrics | null = metrics,
+    from:             SelectedPlace,
+    to:               SelectedPlace,
+    overrideMetrics?: RouteMetrics | null,
   ) {
+    const effectiveMetrics = overrideMetrics !== undefined ? overrideMetrics : metrics;
+
     // Clear any stale segment colours immediately → grey route while loading
     setRouteSegments([]);
     setRouteScore(undefined);
@@ -350,15 +373,15 @@ export default function MapScreen() {
 
     if (!routes.length) { setRouteError(true); return; }
 
-    const { route, allUnsafe } = pickBestRoute(routes, safetyMetrics);
+    const { route, allUnsafe } = pickBestRoute(routes, effectiveMetrics);
     setAllRoutesUnsafe(allUnsafe);
     setRouteCoords(route.coordinates);
     setDurationText(route.durationText || null);
 
     const now = new Date();
-    if (safetyMetrics?.segments?.length) {
-      setRouteSegments(buildRouteSegments(route.coordinates, safetyMetrics.segments, now));
-      setRouteScore(safetyMetrics.score ?? undefined);
+    if (effectiveMetrics?.segments?.length) {
+      setRouteSegments(buildRouteSegments(route.coordinates, effectiveMetrics.segments, now));
+      setRouteScore(effectiveMetrics.score ?? undefined);
     } else {
       setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
     }
@@ -394,22 +417,9 @@ export default function MapScreen() {
     setRouteScore(undefined);
     setRouteError(false);
 
-    // 3. Fire the backend safety re-fetch for the REVERSED direction in the
-    //    background — in parallel with the Google directions call below.
-    const safetyPromise: Promise<RouteMetrics | null> = (async () => {
-      try {
-        const controller = new AbortController();
-        const timeoutId  = setTimeout(() => controller.abort(), 25_000);
-        const url = `${API_URL}/safe-route?origin_lat=${newFrom.lat}&origin_lng=${newFrom.lng}&dest_lat=${newTo.lat}&dest_lng=${newTo.lng}`;
-        const res = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (!res.ok) return null;
-        const data = await res.json();
-        return extractMetrics(data, data.recommended_route);
-      } catch {
-        return null;
-      }
-    })();
+    // 3. Fire the backend safety re-fetch for the REVERSED direction in
+    //    parallel with the Google directions call — uses the extracted helper.
+    const safetyPromise = fetchSafeRouteMetrics(newFrom, newTo);
 
     // 4. Fetch the Google walking route (fast). The route renders grey
     //    immediately while we still await the safety scores.
