@@ -18,9 +18,11 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AddressSearch, { SelectedPlace } from '../../components/AddressSearch';
 import DirectionsPanel from '../../components/DirectionsPanel';
@@ -58,12 +60,28 @@ interface RouteMetrics {
   businessesAvg:  number | null;
   routesCompared: number;
   segments?:      BackendSegment[];
+  crimeEvents?:   CrimeEvent[];
 }
 
 interface BackendSegment {
   crime_incidents:  number;
   lighting_score:   number | null;
   open_businesses:  number | null;
+  /** Individual crime records — added by backend when available */
+  crimes?:          CrimeEvent[];
+}
+
+/**
+ * A single crime occurrence returned by the backend.
+ * The backend must include this in each segment's `crimes` array.
+ * Expected fields: lat, lng, date (YYYY-MM-DD), time (HH:mm), description.
+ */
+interface CrimeEvent {
+  lat:         number;
+  lng:         number;
+  date:        string;
+  time:        string;
+  description: string;
 }
 
 // ── Metric info modal content ──────────────────────────────────────────────────
@@ -138,6 +156,8 @@ function extractMetrics(data: any, recommendedId: number): RouteMetrics | null {
   const clientScore = computeRouteScore(segmentScores);
   const finalScore  = route.score != null ? Math.round(route.score) : clientScore;
 
+  const crimeEvents: CrimeEvent[] = segs.flatMap(s => s.crimes ?? []);
+
   return {
     score:          finalScore,
     crimeTotal:     Math.round(crimeTotal),
@@ -145,6 +165,7 @@ function extractMetrics(data: any, recommendedId: number): RouteMetrics | null {
     businessesAvg,
     routesCompared: data.routes?.length ?? 1,
     segments:       segs,
+    crimeEvents,
   };
 }
 
@@ -202,9 +223,14 @@ function pickBestRoute(
 // ── Screen ────────────────────────────────────────────────────────────────────
 
 export default function MapScreen() {
-  const { top }        = useSafeAreaInsets();
-  const bottomSheetRef = useRef<BottomSheet>(null);
-  const cameraRef      = useRef<CameraRef>(null);
+  const { top }                  = useSafeAreaInsets();
+  const { height: screenHeight } = useWindowDimensions();
+  const bottomSheetRef           = useRef<BottomSheet>(null);
+  const cameraRef                = useRef<CameraRef>(null);
+
+  // Shared value written by BottomSheet — Y position from top of screen.
+  // Initialise to 72% (= 28% sheet height snap) so the button starts correct.
+  const sheetY = useSharedValue(screenHeight * 0.72);
 
   const [uiMode, setUiMode]                     = useState<UIMode>('idle');
   const [following, setFollowing]               = useState(false);
@@ -215,6 +241,8 @@ export default function MapScreen() {
   const [routeSegments, setRouteSegments]       = useState<RouteSegment[]>([]);
   const [routeScore, setRouteScore]             = useState<number | undefined>(undefined);
   const [durationText, setDurationText]         = useState<string | null>(null);
+  const [distanceText, setDistanceText]         = useState<string | null>(null);
+  const [crimeEvents, setCrimeEvents]           = useState<CrimeEvent[]>([]);
   const [metrics, setMetrics]                   = useState<RouteMetrics | null>(null);
   const [isLoadingRoute, setIsLoadingRoute]     = useState(false);
   const [routeError, setRouteError]             = useState(false);
@@ -223,6 +251,15 @@ export default function MapScreen() {
     visible: false,
     key: '',
   });
+  const [crimeModal, setCrimeModal]             = useState<{ visible: boolean; crime: CrimeEvent | null }>({
+    visible: false,
+    crime: null,
+  });
+
+  // Locate button floats 16 px above the bottom sheet at all times.
+  const locateButtonStyle = useAnimatedStyle(() => ({
+    bottom: screenHeight - sheetY.value + 16,
+  }));
 
   // ── Paywall / route access ────────────────────────────────────────────────
   const {
@@ -371,16 +408,20 @@ export default function MapScreen() {
     setAllRoutesUnsafe(allUnsafe);
     setRouteCoords(route.coordinates);
     setDurationText(route.durationText || null);
+    setDistanceText(route.distanceText || null);
+    cameraRef.current?.fitBounds(route.bounds.ne, route.bounds.sw, [80, 80, 280, 80], 800);
+
+    // Let the grey route render for one frame before painting safety colours.
+    await new Promise<void>(r => setTimeout(r, 50));
 
     const now = new Date();
     if (effectiveMetrics?.segments?.length) {
       setRouteSegments(buildRouteSegments(route.coordinates, effectiveMetrics.segments, now));
       setRouteScore(effectiveMetrics.score ?? undefined);
+      setCrimeEvents(effectiveMetrics.crimeEvents ?? []);
     } else {
       setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
     }
-
-    cameraRef.current?.fitBounds(route.bounds.ne, route.bounds.sw, [80, 80, 280, 80], 800);
   }
 
   // ── DirectionsPanel callbacks ─────────────────────────────────────────────
@@ -410,6 +451,8 @@ export default function MapScreen() {
     setRouteCoords([]);
     setRouteSegments([]);
     setRouteScore(undefined);
+    setDistanceText(null);
+    setCrimeEvents([]);
     setRouteError(false);
 
     // 3. Fire the backend safety re-fetch in parallel with Google directions.
@@ -436,6 +479,7 @@ export default function MapScreen() {
       if (m.segments?.length) {
         setRouteSegments(buildRouteSegments(route.coordinates, m.segments, new Date()));
         setRouteScore(m.score ?? undefined);
+        setCrimeEvents(m.crimeEvents ?? []);
         return;
       }
       if (m.score != null) { setRouteScore(m.score); return; }
@@ -451,6 +495,8 @@ export default function MapScreen() {
     setRouteCoords([]);
     setRouteSegments([]);
     setDurationText(null);
+    setDistanceText(null);
+    setCrimeEvents([]);
   }
 
   function handleSearchClear() {
@@ -462,6 +508,8 @@ export default function MapScreen() {
     setRouteSegments([]);
     setRouteScore(undefined);
     setDurationText(null);
+    setDistanceText(null);
+    setCrimeEvents([]);
     setAllRoutesUnsafe(false);
     setUiMode('idle');
   }
@@ -469,6 +517,10 @@ export default function MapScreen() {
   // ── Metric modal ──────────────────────────────────────────────────────────
   function openMetricModal(key: string) { setMetricModal({ visible: true, key }); }
   function closeMetricModal()           { setMetricModal({ visible: false, key: '' }); }
+
+  // ── Crime modal ───────────────────────────────────────────────────────────
+  function openCrimeModal(crime: CrimeEvent) { setCrimeModal({ visible: true, crime }); }
+  function closeCrimeModal()                 { setCrimeModal({ visible: false, crime: null }); }
 
   // ── Score display ─────────────────────────────────────────────────────────
   const effectiveScore = routeScore ?? metrics?.score ?? null;
@@ -478,13 +530,13 @@ export default function MapScreen() {
   const scoreDisplay   = effectiveScore ?? '–';
 
   function routeHeaderLabel(): string {
-    if (durationText) {
-      const safety = effectiveScore != null ? `${scoreStyle.label} — ` : '';
-      return `${safety}${durationText}`;
-    }
     if (metrics) return `Melhor de ${metrics.routesCompared} rota${metrics.routesCompared !== 1 ? 's' : ''}`;
     return destination ? 'Destino selecionado' : 'Localização atual';
   }
+
+  const destinationLabel = destination
+    ? (destination.name ?? destination.address)
+    : address;
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -522,6 +574,18 @@ export default function MapScreen() {
             </View>
           </MapLibreGL.PointAnnotation>
         )}
+
+        {/* Crime dot pins — only shown when a route is active */}
+        {uiMode === 'directions' && crimeEvents.map((crime, i) => (
+          <MapLibreGL.PointAnnotation
+            key={`crime-${i}`}
+            id={`crime-${i}`}
+            coordinate={[crime.lng, crime.lat]}
+            onSelected={() => openCrimeModal(crime)}
+          >
+            <View style={styles.crimeDot} />
+          </MapLibreGL.PointAnnotation>
+        ))}
       </MapLibreGL.MapView>
 
       {/* Top bar */}
@@ -544,15 +608,17 @@ export default function MapScreen() {
         />
       )}
 
-      {/* Locate me */}
+      {/* Locate me — always positioned above the bottom sheet */}
       {uiMode !== 'directions' && (
-        <TouchableOpacity
-          style={[styles.locateButton, following && styles.locateButtonActive]}
-          onPress={handleLocateMe}
-          activeOpacity={0.8}
-        >
-          <MaterialIcons name="my-location" size={22} color={following ? '#4A90D9' : '#666'} />
-        </TouchableOpacity>
+        <Animated.View style={[styles.locateButtonContainer, locateButtonStyle]}>
+          <TouchableOpacity
+            style={[styles.locateButton, following && styles.locateButtonActive]}
+            onPress={handleLocateMe}
+            activeOpacity={0.8}
+          >
+            <MaterialIcons name="my-location" size={22} color={following ? '#4A90D9' : '#666'} />
+          </TouchableOpacity>
+        </Animated.View>
       )}
 
       {/* Free routes counter badge */}
@@ -574,23 +640,42 @@ export default function MapScreen() {
         snapPoints={['28%', '50%']}
         backgroundStyle={styles.sheetBackground}
         handleIndicatorStyle={styles.handleIndicator}
+        animatedPosition={sheetY}
       >
         <BottomSheetView style={styles.sheetContent}>
 
-          <View style={styles.scoreRow}>
-            <View style={styles.locationLabelRow}>
-              <Text style={styles.locationLabel}>{routeHeaderLabel()}</Text>
-              <View style={[styles.scoreDot, { backgroundColor: scoreStyle.color }]} />
-              <Text style={[styles.scoreText, { color: scoreStyle.color }]}>
-                {scoreDisplay} {typeof scoreDisplay === 'number' ? scoreStyle.label : ''}
+          {uiMode === 'directions' && durationText ? (
+            /* Directions mode: time · distance → place → routes + score */
+            <View style={styles.scoreRow}>
+              <Text style={styles.routeTimeText}>
+                {durationText}{distanceText ? ` · ${distanceText}` : ''}
               </Text>
+              <Text style={styles.addressText} numberOfLines={1}>{destinationLabel}</Text>
+              <View style={styles.routeMetaRow}>
+                {metrics && (
+                  <Text style={styles.routeMetaText}>
+                    Melhor de {metrics.routesCompared} rota{metrics.routesCompared !== 1 ? 's' : ''}
+                  </Text>
+                )}
+                <View style={[styles.scoreDot, { backgroundColor: scoreStyle.color }]} />
+                <Text style={[styles.scoreText, { color: scoreStyle.color }]}>
+                  {scoreDisplay} {typeof scoreDisplay === 'number' ? scoreStyle.label : ''}
+                </Text>
+              </View>
             </View>
-            <Text style={styles.addressText} numberOfLines={1}>
-              {destination
-                ? (destination.name ? `${destination.name} — ${destination.address}` : destination.address)
-                : address}
-            </Text>
-          </View>
+          ) : (
+            /* Idle / place_selected mode: label → score → address */
+            <View style={styles.scoreRow}>
+              <View style={styles.locationLabelRow}>
+                <Text style={styles.locationLabel}>{routeHeaderLabel()}</Text>
+                <View style={[styles.scoreDot, { backgroundColor: scoreStyle.color }]} />
+                <Text style={[styles.scoreText, { color: scoreStyle.color }]}>
+                  {scoreDisplay} {typeof scoreDisplay === 'number' ? scoreStyle.label : ''}
+                </Text>
+              </View>
+              <Text style={styles.addressText} numberOfLines={1}>{destinationLabel}</Text>
+            </View>
+          )}
 
           {allRoutesUnsafe && (
             <View style={styles.warningRow}>
@@ -687,6 +772,37 @@ export default function MapScreen() {
         </Pressable>
       </Modal>
 
+      {/* Crime event modal */}
+      <Modal
+        visible={crimeModal.visible}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={closeCrimeModal}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={closeCrimeModal}>
+          <Pressable style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Ocorrência Criminal</Text>
+            {crimeModal.crime?.description ? (
+              <Text style={styles.modalDescription}>{crimeModal.crime.description}</Text>
+            ) : null}
+            <View style={styles.crimeMetaRow}>
+              <View style={styles.crimeMetaItem}>
+                <MaterialIcons name="calendar-today" size={14} color="rgba(0,0,0,0.45)" />
+                <Text style={styles.crimeMetaText}>{crimeModal.crime?.date ?? '—'}</Text>
+              </View>
+              <View style={styles.crimeMetaItem}>
+                <MaterialIcons name="access-time" size={14} color="rgba(0,0,0,0.45)" />
+                <Text style={styles.crimeMetaText}>{crimeModal.crime?.time ?? '—'}</Text>
+              </View>
+            </View>
+            <TouchableOpacity style={styles.modalOkBtn} onPress={closeCrimeModal} activeOpacity={0.8}>
+              <Text style={styles.modalOkText}>Okay</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* Paywall modal */}
       <Paywall
         visible={showPaywall}
@@ -732,8 +848,14 @@ const styles = StyleSheet.create({
 
   destinationPin: { alignItems: 'center', justifyContent: 'center' },
 
+  crimeDot: {
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: '#E05252',
+    borderWidth: 2, borderColor: '#fff',
+  },
+
+  locateButtonContainer: { position: 'absolute', right: 16 },
   locateButton: {
-    position: 'absolute', right: 16, bottom: '30%',
     width: 48, height: 48, borderRadius: 24,
     backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center',
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
@@ -764,6 +886,16 @@ const styles = StyleSheet.create({
   scoreDot: { width: 10, height: 10, borderRadius: 5 },
   scoreText: { fontSize: 13, fontWeight: '600' },
   addressText: { fontSize: 17, fontWeight: '600', color: '#1C1A18' },
+
+  // Directions-mode header hierarchy
+  routeTimeText: { fontSize: 22, fontWeight: '700', color: '#1C1A18', letterSpacing: -0.3 },
+  routeMetaRow:  { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
+  routeMetaText: { fontSize: 12, color: 'rgba(0,0,0,0.45)', flex: 1 },
+
+  // Crime modal meta row
+  crimeMetaRow:  { flexDirection: 'row', gap: 20 },
+  crimeMetaItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  crimeMetaText: { fontSize: 13, color: 'rgba(0,0,0,0.65)' },
 
   warningRow: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
