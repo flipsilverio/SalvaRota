@@ -1,3 +1,10 @@
+/**
+ * Map screen — main feature screen for SalvaRota.
+ *
+ * UIMode state machine:
+ *   idle → place_selected → directions
+ */
+
 import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 import MapLibreGL, { CameraRef } from '@maplibre/maplibre-react-native';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -17,8 +24,19 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AddressSearch, { SelectedPlace } from '../../components/AddressSearch';
 import DirectionsPanel from '../../components/DirectionsPanel';
-import RouteLayer from '../../components/RouteLayer';
-import { fetchWalkingRoute } from '../../services/directionsService';
+import Paywall from '../../components/Paywall';
+import RouteLayer, { RouteSegment } from '../../components/RouteLayer';
+import { useRouteAccess } from '../../hooks/useRouteAccess';
+import { fetchWalkingRoutes, RouteResult } from '../../services/directionsService';
+import {
+  computeRouteScore,
+  computeSegmentScore,
+  daylightScore,
+  scoreLabel,
+  scoreToColor,
+  splitCoordinates,
+  timeSafetyScore,
+} from '../../services/safetyScoring';
 
 MapLibreGL.setAccessToken(null);
 
@@ -38,7 +56,14 @@ interface RouteMetrics {
   crimeTotal:     number;
   lightingAvg:    number | null;
   businessesAvg:  number | null;
-  routesCompared: number; // how many alternative routes were scored
+  routesCompared: number;
+  segments?:      BackendSegment[];
+}
+
+interface BackendSegment {
+  crime_incidents:  number;
+  lighting_score:   number | null;
+  open_businesses:  number | null;
 }
 
 // ── Metric info modal content ──────────────────────────────────────────────────
@@ -69,64 +94,85 @@ const METRIC_INFO: Record<string, { title: string; description: string }> = {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function getScoreStyle(score: number): { label: string; color: string } {
-  if (score >= 75) return { label: 'Seguro',   color: '#5BAD6F' };
-  if (score >= 40) return { label: 'Moderado', color: SCORE_AMBER };
-  return              { label: 'Perigoso', color: '#E05252' };
+  return { label: scoreLabel(score), color: scoreToColor(score) };
 }
 
 /**
- * Time-of-day safety indicator based on the device clock.
- *
- * Buckets derived from ISP Rio crime statistics and peer-reviewed research:
- *   - ISP Rio (2023): ~38 % of street robberies occur between 14:00–19:00
- *   - Bernasco et al. (2017): nocturnal peak 20:00–00:00 across urban centres
- *   - Uttley & Fotios (2017): darkness multiplies robbery risk ~1.5×
- *   - Tompson & Bowers (2013): early-morning hours show sharp crime drop
- *
- * 05:00–09:00 → green  — low pedestrian targets; commuter rush still safe
- * 09:00–14:00 → amber  — moderate daytime activity
- * 14:00–19:00 → red    — Rio afternoon robbery peak (~38 % of incidents)
- * 19:00–03:00 → red    — primary nocturnal peak + bar-closing cluster
- * 03:00–05:00 → amber  — deep night; very few targets, crime recedes
+ * Time-of-day safety indicator — combines time score with daylight check.
  */
 function getTimeInfo(): { value: string; color: string } {
   const now  = new Date();
   const h    = now.getHours();
   const time = `${String(h).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-
-  if (h >= 5  && h < 9)  return { value: time, color: '#5BAD6F' };   // early morning, safe
-  if (h >= 9  && h < 14) return { value: time, color: SCORE_AMBER }; // mid-morning to midday
-  if (h >= 14 && h < 19) return { value: time, color: '#E05252' };   // ISP Rio afternoon peak
-  if (h >= 19)           return { value: time, color: '#E05252' };   // nocturnal peak
-  if (h < 3)             return { value: time, color: '#E05252' };   // bar-closing cluster
-  return                         { value: time, color: SCORE_AMBER }; // 03:00–05:00, risk recedes
+  const combined = Math.round((timeSafetyScore(now) + daylightScore(now)) / 2);
+  return { value: time, color: scoreToColor(combined) };
 }
 
 function extractMetrics(data: any, recommendedId: number): RouteMetrics | null {
   const route = data.routes?.find((r: any) => r.route_id === recommendedId);
   if (!route || !route.segments?.length) return null;
 
-  const segs = route.segments as any[];
+  const segs: BackendSegment[] = route.segments;
 
-  const crimeTotal = segs.reduce((acc: number, s: any) => acc + (s.crime_incidents ?? 0), 0);
+  const crimeTotal = segs.reduce((acc, s) => acc + (s.crime_incidents ?? 0), 0);
 
-  const litSegs = segs.filter((s: any) => s.lighting_score !== null && s.lighting_score !== undefined);
+  const litSegs = segs.filter(s => s.lighting_score !== null && s.lighting_score !== undefined);
   const lightingAvg = litSegs.length > 0
-    ? Math.round(litSegs.reduce((acc: number, s: any) => acc + s.lighting_score, 0) / litSegs.length)
+    ? Math.round(litSegs.reduce((acc, s) => acc + (s.lighting_score ?? 0), 0) / litSegs.length)
     : null;
 
-  const bizSegs = segs.filter((s: any) => s.open_businesses !== null && s.open_businesses !== undefined);
+  const bizSegs = segs.filter(s => s.open_businesses !== null && s.open_businesses !== undefined);
   const businessesAvg = bizSegs.length > 0
-    ? Math.round(bizSegs.reduce((acc: number, s: any) => acc + s.open_businesses, 0) / bizSegs.length)
+    ? Math.round(bizSegs.reduce((acc, s) => acc + (s.open_businesses ?? 0), 0) / bizSegs.length)
     : null;
+
+  const now = new Date();
+  const segmentScores = segs.map(s =>
+    computeSegmentScore({
+      lightingScore:  s.lighting_score  ?? null,
+      openBusinesses: s.open_businesses ?? null,
+      crimeIncidents: s.crime_incidents ?? 0,
+      date:           now,
+    })
+  );
+  const clientScore = computeRouteScore(segmentScores);
+  const finalScore  = route.score != null ? Math.round(route.score) : clientScore;
 
   return {
-    score:          route.score !== null && route.score !== undefined ? Math.round(route.score) : null,
+    score:          finalScore,
     crimeTotal:     Math.round(crimeTotal),
     lightingAvg,
     businessesAvg,
     routesCompared: data.routes?.length ?? 1,
+    segments:       segs,
   };
+}
+
+function buildRouteSegments(
+  coords:   [number, number][],
+  segments: BackendSegment[],
+  date:     Date = new Date(),
+): RouteSegment[] {
+  if (!segments.length || coords.length < 2) return [];
+  const parts = splitCoordinates(coords, segments.length);
+  return parts.map((part, i) => ({
+    coordinates: part,
+    score: computeSegmentScore({
+      lightingScore:  segments[i].lighting_score  ?? null,
+      openBusinesses: segments[i].open_businesses ?? null,
+      crimeIncidents: segments[i].crime_incidents ?? 0,
+      date,
+    }),
+  }));
+}
+
+function pickBestRoute(
+  routes:          RouteResult[],
+  backendMetrics?: RouteMetrics | null,
+): { route: RouteResult; allUnsafe: boolean } {
+  if (!routes.length) throw new Error('No routes available');
+  const score = backendMetrics?.score ?? Math.round((timeSafetyScore() + daylightScore()) / 2);
+  return { route: routes[0], allUnsafe: score < 50 };
 }
 
 // ── Screen ────────────────────────────────────────────────────────────────────
@@ -136,19 +182,33 @@ export default function MapScreen() {
   const bottomSheetRef = useRef<BottomSheet>(null);
   const cameraRef      = useRef<CameraRef>(null);
 
-  const [uiMode, setUiMode]                 = useState<UIMode>('idle');
-  const [following, setFollowing]           = useState(false);
-  const [address, setAddress]               = useState('Localização atual');
-  const [fromPlace, setFromPlace]           = useState<SelectedPlace | null>(null);
-  const [destination, setDestination]       = useState<SelectedPlace | null>(null);
-  const [routeCoords, setRouteCoords]       = useState<[number, number][]>([]);
-  const [metrics, setMetrics]               = useState<RouteMetrics | null>(null);
-  const [isLoadingRoute, setIsLoadingRoute] = useState(false);
-  const [routeError, setRouteError]         = useState(false);
-  const [metricModal, setMetricModal]       = useState<{ visible: boolean; key: string }>({
+  const [uiMode, setUiMode]                     = useState<UIMode>('idle');
+  const [following, setFollowing]               = useState(false);
+  const [address, setAddress]                   = useState('Localização atual');
+  const [fromPlace, setFromPlace]               = useState<SelectedPlace | null>(null);
+  const [destination, setDestination]           = useState<SelectedPlace | null>(null);
+  const [routeCoords, setRouteCoords]           = useState<[number, number][]>([]);
+  const [routeSegments, setRouteSegments]       = useState<RouteSegment[]>([]);
+  const [routeScore, setRouteScore]             = useState<number | undefined>(undefined);
+  const [durationText, setDurationText]         = useState<string | null>(null);
+  const [metrics, setMetrics]                   = useState<RouteMetrics | null>(null);
+  const [isLoadingRoute, setIsLoadingRoute]     = useState(false);
+  const [routeError, setRouteError]             = useState(false);
+  const [allRoutesUnsafe, setAllRoutesUnsafe]   = useState(false);
+  const [metricModal, setMetricModal]           = useState<{ visible: boolean; key: string }>({
     visible: false,
     key: '',
   });
+
+  // ── Paywall / route access ────────────────────────────────────────────────
+  const {
+    freeRoutesRemaining,
+    passIsActive,
+    showPaywall,
+    requestRouteAccess,
+    onPurchaseComplete,
+    dismissPaywall,
+  } = useRouteAccess();
 
   // ── Live location + reverse geocoding ────────────────────────────────────
   useEffect(() => {
@@ -189,7 +249,6 @@ export default function MapScreen() {
 
   // ── Destination picked from search ────────────────────────────────────────
   async function handlePlaceSelected(place: SelectedPlace) {
-    // Guard: validate coordinates before touching camera or map
     if (!isFinite(place.lat) || !isFinite(place.lng)) {
       console.warn('[Route] Invalid coordinates for place:', place);
       return;
@@ -200,6 +259,10 @@ export default function MapScreen() {
     setRouteError(false);
     setMetrics(null);
     setRouteCoords([]);
+    setRouteSegments([]);
+    setRouteScore(undefined);
+    setDurationText(null);
+    setAllRoutesUnsafe(false);
     setUiMode('place_selected');
 
     cameraRef.current?.setCamera({
@@ -210,7 +273,6 @@ export default function MapScreen() {
 
     bottomSheetRef.current?.snapToIndex(1);
 
-    // Pre-load backend metrics in background so they're ready when user taps "Como chegar"
     let originLat: number, originLng: number;
     try {
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
@@ -224,85 +286,95 @@ export default function MapScreen() {
     }
 
     setIsLoadingRoute(true);
-    // Use AbortController for broader RN compatibility
     const controller = new AbortController();
     const timeoutId  = setTimeout(() => controller.abort(), 25_000);
     try {
       const url = `${API_URL}/safe-route?origin_lat=${originLat}&origin_lng=${originLng}&dest_lat=${place.lat}&dest_lng=${place.lng}`;
       console.log('[Route] fetching', url);
       const res = await fetch(url, { signal: controller.signal });
-      if (!res.ok) {
-        console.warn('[Route] HTTP error', res.status);
-        setRouteError(true);
-        return;
-      }
+      if (!res.ok) { setRouteError(true); return; }
       const data = await res.json();
-      console.log('[Route] response recommended_route=', data.recommended_route,
-        'routes=', data.routes?.length, 'score=', data.routes?.[0]?.score);
       const m = extractMetrics(data, data.recommended_route);
-      console.log('[Route] extracted metrics', JSON.stringify(m));
       setMetrics(m);
     } catch (err: any) {
-      console.warn('[Route] fetch error:', err?.message ?? err);
-      setRouteError(true);
+      if (err?.name !== 'AbortError') {
+        const now = new Date();
+        const clientScore = Math.round((timeSafetyScore(now) + daylightScore(now)) / 2);
+        setMetrics({ score: clientScore, crimeTotal: 0, lightingAvg: null, businessesAvg: null, routesCompared: 1 });
+      }
     } finally {
       clearTimeout(timeoutId);
       setIsLoadingRoute(false);
     }
   }
 
-  // ── "Como chegar" — fetch geometry and switch to directions mode ──────────
+  // ── "Como chegar" ─────────────────────────────────────────────────────────
   async function handleGetDirections() {
     if (!destination || !fromPlace) return;
+
+    const allowed = await requestRouteAccess();
+    if (!allowed) return;
+
     setRouteError(false);
     setRouteCoords([]);
+    setRouteSegments([]);
+    setDurationText(null);
+    setAllRoutesUnsafe(false);
     setUiMode('directions');
     bottomSheetRef.current?.snapToIndex(1);
 
-    const result = await fetchWalkingRoute(fromPlace, destination);
-    if (!result) {
-      setRouteError(true);
-      return;
+    await fetchAndDisplayRoute(fromPlace, destination);
+  }
+
+  async function fetchAndDisplayRoute(from: SelectedPlace, to: SelectedPlace) {
+    setIsLoadingRoute(true);
+    const routes = await fetchWalkingRoutes(from, to);
+    setIsLoadingRoute(false);
+
+    if (!routes.length) { setRouteError(true); return; }
+
+    const { route, allUnsafe } = pickBestRoute(routes, metrics);
+    setAllRoutesUnsafe(allUnsafe);
+    setRouteCoords(route.coordinates);
+    setDurationText(route.durationText || null);
+
+    const now = new Date();
+    if (metrics?.segments?.length) {
+      setRouteSegments(buildRouteSegments(route.coordinates, metrics.segments, now));
+      setRouteScore(metrics.score ?? undefined);
+    } else {
+      setRouteSegments([]);
+      setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
     }
 
-    setRouteCoords(result.coordinates);
-    cameraRef.current?.fitBounds(result.bounds.ne, result.bounds.sw, [80, 80, 280, 80], 800);
+    cameraRef.current?.fitBounds(route.bounds.ne, route.bounds.sw, [80, 80, 280, 80], 800);
   }
 
   // ── DirectionsPanel callbacks ─────────────────────────────────────────────
   async function handleFromChange(place: SelectedPlace) {
     setFromPlace(place);
-    await refetchRoute(place, destination);
+    if (destination) await fetchAndDisplayRoute(place, destination);
   }
 
   async function handleToChange(place: SelectedPlace) {
     setDestination(place);
-    await refetchRoute(fromPlace, place);
+    if (fromPlace) await fetchAndDisplayRoute(fromPlace, place);
   }
 
   function handleSwap() {
-    // Guard: both must be set before swapping
     if (!fromPlace || !destination) return;
     const prev = fromPlace;
     setFromPlace(destination);
     setDestination(prev);
-    refetchRoute(destination, prev);
-  }
-
-  async function refetchRoute(from: SelectedPlace | null, to: SelectedPlace | null) {
-    if (!from || !to) return;
-    setRouteCoords([]);
-    const result = await fetchWalkingRoute(from, to);
-    if (result) {
-      setRouteCoords(result.coordinates);
-      cameraRef.current?.fitBounds(result.bounds.ne, result.bounds.sw, [80, 80, 280, 80], 800);
-    }
+    fetchAndDisplayRoute(destination, prev);
   }
 
   // ── Back / clear ──────────────────────────────────────────────────────────
   function handleDirectionsClose() {
     setUiMode('place_selected');
     setRouteCoords([]);
+    setRouteSegments([]);
+    setDurationText(null);
   }
 
   function handleSearchClear() {
@@ -311,21 +383,32 @@ export default function MapScreen() {
     setMetrics(null);
     setRouteError(false);
     setRouteCoords([]);
+    setRouteSegments([]);
+    setRouteScore(undefined);
+    setDurationText(null);
+    setAllRoutesUnsafe(false);
     setUiMode('idle');
   }
 
   // ── Metric modal ──────────────────────────────────────────────────────────
-  function openMetricModal(key: string) {
-    setMetricModal({ visible: true, key });
-  }
-
-  function closeMetricModal() {
-    setMetricModal({ visible: false, key: '' });
-  }
+  function openMetricModal(key: string) { setMetricModal({ visible: true, key }); }
+  function closeMetricModal()           { setMetricModal({ visible: false, key: '' }); }
 
   // ── Score display ─────────────────────────────────────────────────────────
-  const scoreStyle   = (metrics?.score != null) ? getScoreStyle(metrics.score) : { label: '–', color: '#BDBDBD' };
-  const scoreDisplay = metrics?.score ?? '–';
+  const effectiveScore = routeScore ?? metrics?.score ?? null;
+  const scoreStyle     = effectiveScore != null
+    ? getScoreStyle(effectiveScore)
+    : { label: '–', color: '#BDBDBD' };
+  const scoreDisplay   = effectiveScore ?? '–';
+
+  function routeHeaderLabel(): string {
+    if (durationText) {
+      const safety = effectiveScore != null ? `${scoreStyle.label} — ` : '';
+      return `${safety}${durationText}`;
+    }
+    if (metrics) return `Melhor de ${metrics.routesCompared} rota${metrics.routesCompared !== 1 ? 's' : ''}`;
+    return destination ? 'Destino selecionado' : 'Localização atual';
+  }
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -347,9 +430,12 @@ export default function MapScreen() {
         <MapLibreGL.UserLocation visible renderMode={MapLibreGL.UserLocationRenderMode.Native} />
 
         {/* Route polyline — always mounted to avoid native layer teardown crash */}
-        <RouteLayer coordinates={routeCoords} />
+        <RouteLayer
+          coordinates={routeCoords}
+          segments={routeSegments.length > 0 ? routeSegments : undefined}
+          score={routeScore}
+        />
 
-        {/* Destination pin */}
         {destination && (
           <MapLibreGL.PointAnnotation
             id="destination"
@@ -362,7 +448,7 @@ export default function MapScreen() {
         )}
       </MapLibreGL.MapView>
 
-      {/* Top bar — AddressSearch in idle/place_selected, DirectionsPanel in directions */}
+      {/* Top bar */}
       {uiMode === 'directions' ? (
         <DirectionsPanel
           style={{ top: top + 12 }}
@@ -393,6 +479,18 @@ export default function MapScreen() {
         </TouchableOpacity>
       )}
 
+      {/* Free routes counter badge */}
+      {freeRoutesRemaining !== null && !passIsActive && freeRoutesRemaining < 3 && (
+        <View style={[styles.freeCountBadge, { top: top + 76 }]}>
+          <MaterialIcons name="route" size={12} color="#888" />
+          <Text style={styles.freeCountText}>
+            {freeRoutesRemaining > 0
+              ? `${freeRoutesRemaining} rota${freeRoutesRemaining !== 1 ? 's' : ''} grátis`
+              : 'Rotas grátis esgotadas'}
+          </Text>
+        </View>
+      )}
+
       {/* Bottom sheet */}
       <BottomSheet
         ref={bottomSheetRef}
@@ -403,34 +501,35 @@ export default function MapScreen() {
       >
         <BottomSheetView style={styles.sheetContent}>
 
-          {/* Header — location label + score badge */}
           <View style={styles.scoreRow}>
             <View style={styles.locationLabelRow}>
-              <Text style={styles.locationLabel}>
-                {metrics
-                  ? `Melhor de ${metrics.routesCompared} rota${metrics.routesCompared !== 1 ? 's' : ''}`
-                  : destination ? 'Destino selecionado' : 'Localização atual'}
-              </Text>
+              <Text style={styles.locationLabel}>{routeHeaderLabel()}</Text>
               <View style={[styles.scoreDot, { backgroundColor: scoreStyle.color }]} />
               <Text style={[styles.scoreText, { color: scoreStyle.color }]}>
-                {scoreDisplay} {scoreStyle.label}
+                {scoreDisplay} {typeof scoreDisplay === 'number' ? scoreStyle.label : ''}
               </Text>
             </View>
             <Text style={styles.addressText} numberOfLines={1}>
-              {destination ? destination.address : address}
+              {destination
+                ? (destination.name ? `${destination.name} — ${destination.address}` : destination.address)
+                : address}
             </Text>
           </View>
 
+          {allRoutesUnsafe && (
+            <View style={styles.warningRow}>
+              <MaterialIcons name="warning" size={14} color="#E05252" />
+              <Text style={styles.warningText}>Mostrando a rota mais segura disponível.</Text>
+            </View>
+          )}
+
           <View style={styles.divider} />
 
-          {/* Loading */}
           {isLoadingRoute ? (
             <View style={styles.stateRow}>
               <ActivityIndicator size="small" color={SCORE_AMBER} />
               <Text style={styles.stateText}>Calculando rota segura…</Text>
             </View>
-
-          /* Error */
           ) : routeError ? (
             <View style={styles.stateRow}>
               <MaterialIcons name="error-outline" size={18} color="#E05252" />
@@ -438,12 +537,8 @@ export default function MapScreen() {
                 Não foi possível calcular a rota
               </Text>
             </View>
-
-          /* Metrics */
           ) : (
             <View style={styles.metricsGrid}>
-
-              {/* Idle-mode hint — shown when no destination has been selected yet */}
               {!destination && (
                 <Text style={styles.idleHint}>
                   Busque um destino para ver as métricas de segurança da rota
@@ -453,25 +548,21 @@ export default function MapScreen() {
               <MetricRow
                 label="Iluminação"
                 value={metrics?.lightingAvg != null ? `${metrics.lightingAvg} / 100` : null}
-                color={metrics?.lightingAvg != null ? getScoreStyle(metrics.lightingAvg).color : '#BDBDBD'}
+                color={metrics?.lightingAvg != null ? scoreToColor(metrics.lightingAvg) : '#BDBDBD'}
                 onPress={() => openMetricModal('Iluminação')}
               />
-
               <MetricRow
                 label="Negócios abertos"
                 value={metrics?.businessesAvg != null ? `${metrics.businessesAvg} por trecho` : null}
                 color={SCORE_AMBER}
                 onPress={() => openMetricModal('Negócios abertos')}
               />
-
               <MetricRow
                 label="Crime"
                 value={metrics != null ? `${metrics.crimeTotal} nos últimos 90d` : null}
                 color={metrics?.crimeTotal === 0 ? '#5BAD6F' : '#E05252'}
                 onPress={() => openMetricModal('Crime')}
               />
-
-              {/* Hora — always shown, uses device clock */}
               {(() => { const t = getTimeInfo(); return (
                 <MetricRow
                   label="Hora"
@@ -480,11 +571,9 @@ export default function MapScreen() {
                   onPress={() => openMetricModal('Hora')}
                 />
               ); })()}
-
             </View>
           )}
 
-          {/* CTA */}
           {destination && uiMode !== 'directions' && (
             <TouchableOpacity
               style={styles.ctaButton}
@@ -515,16 +604,19 @@ export default function MapScreen() {
             <Text style={styles.modalDescription}>
               {METRIC_INFO[metricModal.key]?.description}
             </Text>
-            <TouchableOpacity
-              style={styles.modalOkBtn}
-              onPress={closeMetricModal}
-              activeOpacity={0.8}
-            >
+            <TouchableOpacity style={styles.modalOkBtn} onPress={closeMetricModal} activeOpacity={0.8}>
               <Text style={styles.modalOkText}>Okay</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* Paywall modal */}
+      <Paywall
+        visible={showPaywall}
+        onPurchaseSuccess={onPurchaseComplete}
+        onDismiss={dismissPaywall}
+      />
 
     </GestureHandlerRootView>
   );
@@ -562,186 +654,86 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   map:       { flex: 1 },
 
-  destinationPin: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  destinationPin: { alignItems: 'center', justifyContent: 'center' },
 
   locateButton: {
-    position: 'absolute',
-    right: 16,
-    bottom: '30%',
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 5,
+    position: 'absolute', right: 16, bottom: '30%',
+    width: 48, height: 48, borderRadius: 24,
+    backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2, shadowRadius: 4, elevation: 5,
   },
-  locateButtonActive: {
-    backgroundColor: '#fff',
+  locateButtonActive: { backgroundColor: '#fff' },
+
+  freeCountBadge: {
+    position: 'absolute', right: 16,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: 'rgba(255,255,255,0.9)', borderRadius: 12,
+    paddingHorizontal: 10, paddingVertical: 5,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1, shadowRadius: 4, elevation: 3,
   },
+  freeCountText: { fontSize: 11, color: '#888' },
 
   sheetBackground: {
     backgroundColor: PANEL_BG,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    borderTopLeftRadius: 20, borderTopRightRadius: 20,
   },
-  handleIndicator: {
-    backgroundColor: 'rgba(0,0,0,0.15)',
-    width: 36,
-  },
-  sheetContent: {
-    flex: 1,
-    paddingHorizontal: 24,
-    paddingTop: 8,
-  },
+  handleIndicator: { backgroundColor: 'rgba(0,0,0,0.15)', width: 36 },
+  sheetContent: { flex: 1, paddingHorizontal: 24, paddingTop: 8 },
 
-  scoreRow: {
-    paddingVertical: 12,
-    gap: 4,
-  },
-  locationLabelRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  locationLabel: {
-    fontSize: 13,
-    color: 'rgba(0,0,0,0.45)',
-  },
-  scoreDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-  },
-  scoreText: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  addressText: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: '#1C1A18',
-  },
+  scoreRow: { paddingVertical: 12, gap: 4 },
+  locationLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  locationLabel: { fontSize: 13, color: 'rgba(0,0,0,0.45)' },
+  scoreDot: { width: 10, height: 10, borderRadius: 5 },
+  scoreText: { fontSize: 13, fontWeight: '600' },
+  addressText: { fontSize: 17, fontWeight: '600', color: '#1C1A18' },
 
-  divider: {
-    height: 1,
-    backgroundColor: 'rgba(0,0,0,0.08)',
-    marginBottom: 14,
+  warningRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingVertical: 4, paddingHorizontal: 8,
+    backgroundColor: 'rgba(224,82,82,0.08)', borderRadius: 8, marginBottom: 4,
   },
+  warningText: { fontSize: 12, color: '#E05252', flex: 1 },
 
-  stateRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 4,
-  },
-  stateText: {
-    fontSize: 13,
-    color: '#AAA',
-  },
+  divider: { height: 1, backgroundColor: 'rgba(0,0,0,0.08)', marginBottom: 14 },
 
-  idleHint: {
-    fontSize: 12,
-    color: 'rgba(0,0,0,0.38)',
-    marginBottom: 4,
-    lineHeight: 17,
-  },
+  stateRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
+  stateText: { fontSize: 13, color: '#AAA' },
+
+  idleHint: { fontSize: 12, color: 'rgba(0,0,0,0.38)', marginBottom: 4, lineHeight: 17 },
 
   metricsGrid: { gap: 12 },
-  metricRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 2,
-  },
-  metricDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    flexShrink: 0,
-  },
-  metricLabel: {
-    fontSize: 13,
-    color: 'rgba(0,0,0,0.55)',
-    flex: 1,
-  },
-  metricValue: {
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  metricInfoIcon: {
-    marginLeft: 4,
-  },
+  metricRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 2 },
+  metricDot: { width: 8, height: 8, borderRadius: 4, flexShrink: 0 },
+  metricLabel: { fontSize: 13, color: 'rgba(0,0,0,0.55)', flex: 1 },
+  metricValue: { fontSize: 13, fontWeight: '600' },
+  metricInfoIcon: { marginLeft: 4 },
 
   ctaButton: {
-    marginTop: 20,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 999,
-    backgroundColor: SCORE_AMBER,
-    alignSelf: 'center',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 4,
+    marginTop: 20, paddingVertical: 12, paddingHorizontal: 16,
+    borderRadius: 999, backgroundColor: SCORE_AMBER,
+    alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 8,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15, shadowRadius: 6, elevation: 4,
   },
-  ctaButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#1C1A18',
-  },
+  ctaButtonText: { fontSize: 14, fontWeight: '600', color: '#1C1A18' },
 
-  // ── Modal ──────────────────────────────────────────────────────────────────
+  // ── Metric info modal ──────────────────────────────────────────────────────
   modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 28,
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center', alignItems: 'center', paddingHorizontal: 28,
   },
   modalCard: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 24,
-    width: '100%',
-    gap: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.18,
-    shadowRadius: 20,
-    elevation: 12,
+    backgroundColor: '#fff', borderRadius: 20, padding: 24, width: '100%', gap: 12,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18, shadowRadius: 20, elevation: 12,
   },
-  modalTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#1C1A18',
-  },
-  modalDescription: {
-    fontSize: 14,
-    color: 'rgba(0,0,0,0.65)',
-    lineHeight: 21,
-  },
+  modalTitle:       { fontSize: 17, fontWeight: '700', color: '#1C1A18' },
+  modalDescription: { fontSize: 14, color: 'rgba(0,0,0,0.65)', lineHeight: 21 },
   modalOkBtn: {
-    marginTop: 4,
-    paddingVertical: 12,
-    borderRadius: 999,
-    backgroundColor: SCORE_AMBER,
-    alignItems: 'center',
+    marginTop: 4, paddingVertical: 12, borderRadius: 999,
+    backgroundColor: SCORE_AMBER, alignItems: 'center',
   },
-  modalOkText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#1C1A18',
-  },
+  modalOkText: { fontSize: 15, fontWeight: '700', color: '#1C1A18' },
 });
