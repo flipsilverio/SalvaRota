@@ -152,11 +152,12 @@ export interface SegmentInput {
  * Score a single route segment combining all available signals.
  *
  * Formula (weighted average minus crime penalty, clamped to [0, 100]):
- *   segmentScore = lightScore×0.40 + timeScore×0.25 + businessScore×0.35 − dangerPenalty
+ *   segmentScore = lightScore×0.45 + timeScore×0.125 + businessScore×0.425 − dangerPenalty
  *
  * Light score:    Backend infrastructure score adjusted for time of day.
  *                 Daylight adds a bonus but never masks poor infrastructure.
- * Time score:     From timeSafetyScore() bucket (weight reduced to 0.25).
+ * Time score:     From timeSafetyScore() bucket — weight halved (0.125) so
+ *                 evening hours don't dominate over physical infrastructure.
  * Business score: Open businesses reduce crime risk; capped at 90 so businesses
  *                 alone cannot push a segment to green.
  * Danger penalty: Applies from the first crime incident (1–2 → −8).
@@ -198,7 +199,7 @@ export function computeSegmentScore(params: SegmentInput): number {
   else if (crime <= 10) dangerPenalty = 22;
   else                  dangerPenalty = 32;
 
-  const raw = lightScore * 0.40 + timeScore * 0.25 + businessScore * 0.35 - dangerPenalty;
+  const raw = lightScore * 0.45 + timeScore * 0.125 + businessScore * 0.425 - dangerPenalty;
   return Math.max(0, Math.min(100, Math.round(raw)));
 }
 
