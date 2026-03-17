@@ -52,7 +52,8 @@ interface Props {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const BLUE = '#4A90D9'; // default when no score
+/** Neutral colour shown while safety data is still loading */
+const LOADING_GREY = '#C8C8C8';
 
 function buildSegmentedShape(segments: RouteSegment[]): GeoJSON.FeatureCollection {
   if (!segments.length) return emptyCollection();
@@ -104,7 +105,7 @@ const COLOR_EXPRESSION = ['get', 'color'] as any;
 
 export default function RouteLayer({ coordinates, segments, score }: Props) {
   const hasSegments = segments && segments.length > 0;
-  const routeColor  = score !== undefined ? scoreToColor(score) : BLUE;
+  const routeColor  = score !== undefined ? scoreToColor(score) : LOADING_GREY;
 
   const shape = hasSegments
     ? buildSegmentedShape(segments)

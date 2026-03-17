@@ -326,24 +326,40 @@ export default function MapScreen() {
     await fetchAndDisplayRoute(fromPlace, destination);
   }
 
-  async function fetchAndDisplayRoute(from: SelectedPlace, to: SelectedPlace) {
+  /**
+   * Fetches the Google walking route and renders it.
+   * Always starts with a grey (no-score) route and applies
+   * safety colours only once safetyMetrics is provided.
+   *
+   * Pass `safetyMetrics` explicitly so callers can supply
+   * fresh data (e.g. after a swap re-fetch) without relying
+   * on the React state closure which may still hold stale data.
+   */
+  async function fetchAndDisplayRoute(
+    from:          SelectedPlace,
+    to:            SelectedPlace,
+    safetyMetrics: RouteMetrics | null = metrics,
+  ) {
+    // Clear any stale segment colours immediately → grey route while loading
+    setRouteSegments([]);
+    setRouteScore(undefined);
+
     setIsLoadingRoute(true);
     const routes = await fetchWalkingRoutes(from, to);
     setIsLoadingRoute(false);
 
     if (!routes.length) { setRouteError(true); return; }
 
-    const { route, allUnsafe } = pickBestRoute(routes, metrics);
+    const { route, allUnsafe } = pickBestRoute(routes, safetyMetrics);
     setAllRoutesUnsafe(allUnsafe);
     setRouteCoords(route.coordinates);
     setDurationText(route.durationText || null);
 
     const now = new Date();
-    if (metrics?.segments?.length) {
-      setRouteSegments(buildRouteSegments(route.coordinates, metrics.segments, now));
-      setRouteScore(metrics.score ?? undefined);
+    if (safetyMetrics?.segments?.length) {
+      setRouteSegments(buildRouteSegments(route.coordinates, safetyMetrics.segments, now));
+      setRouteScore(safetyMetrics.score ?? undefined);
     } else {
-      setRouteSegments([]);
       setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
     }
 
@@ -361,12 +377,69 @@ export default function MapScreen() {
     if (fromPlace) await fetchAndDisplayRoute(fromPlace, place);
   }
 
-  function handleSwap() {
+  async function handleSwap() {
     if (!fromPlace || !destination) return;
-    const prev = fromPlace;
-    setFromPlace(destination);
-    setDestination(prev);
-    fetchAndDisplayRoute(destination, prev);
+
+    const newFrom = destination;
+    const newTo   = fromPlace;
+
+    // 1. Flip the address labels immediately so the UI feels responsive.
+    setFromPlace(newFrom);
+    setDestination(newTo);
+
+    // 2. Clear ALL stale safety data so the route goes grey right away
+    //    instead of showing inverted colours from the previous direction.
+    setMetrics(null);
+    setRouteSegments([]);
+    setRouteScore(undefined);
+    setRouteError(false);
+
+    // 3. Fire the backend safety re-fetch for the REVERSED direction in the
+    //    background — in parallel with the Google directions call below.
+    const safetyPromise: Promise<RouteMetrics | null> = (async () => {
+      try {
+        const controller = new AbortController();
+        const timeoutId  = setTimeout(() => controller.abort(), 25_000);
+        const url = `${API_URL}/safe-route?origin_lat=${newFrom.lat}&origin_lng=${newFrom.lng}&dest_lat=${newTo.lat}&dest_lng=${newTo.lng}`;
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        if (!res.ok) return null;
+        const data = await res.json();
+        return extractMetrics(data, data.recommended_route);
+      } catch {
+        return null;
+      }
+    })();
+
+    // 4. Fetch the Google walking route (fast). The route renders grey
+    //    immediately while we still await the safety scores.
+    setIsLoadingRoute(true);
+    const routes = await fetchWalkingRoutes(newFrom, newTo);
+    setIsLoadingRoute(false);
+
+    if (!routes.length) { setRouteError(true); return; }
+
+    const { route, allUnsafe } = pickBestRoute(routes, null);
+    setAllRoutesUnsafe(allUnsafe);
+    setRouteCoords(route.coordinates);   // ← grey route appears here
+    setDurationText(route.durationText || null);
+    cameraRef.current?.fitBounds(route.bounds.ne, route.bounds.sw, [80, 80, 280, 80], 800);
+
+    // 5. Once safety data arrives, paint the segment colours.
+    const m = await safetyPromise;
+    if (m) {
+      setMetrics(m);
+      if (m.segments?.length) {
+        setRouteSegments(buildRouteSegments(route.coordinates, m.segments, new Date()));
+        setRouteScore(m.score ?? undefined);
+        return;
+      }
+      // Backend responded but had no segments — show overall score colour
+      if (m.score != null) { setRouteScore(m.score); return; }
+    }
+    // Fallback: time-based score only
+    const now = new Date();
+    setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
   }
 
   // ── Back / clear ──────────────────────────────────────────────────────────
