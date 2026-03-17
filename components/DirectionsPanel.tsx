@@ -63,9 +63,15 @@ export default function DirectionsPanel({
   const sessionToken = useRef(generateToken());
   const debounce     = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Sync text fields when parent swaps or updates addresses
-  useEffect(() => { setFromText(fromAddress); }, [fromAddress]);
-  useEffect(() => { setToText(toAddress); }, [toAddress]);
+  // ── Sync local text when parent swaps addresses ───────────────────────────
+  // Only sync the field that is not currently being edited by the user
+  useEffect(() => {
+    if (activeField !== 'from') setFromText(fromAddress);
+  }, [fromAddress]);
+
+  useEffect(() => {
+    if (activeField !== 'to') setToText(toAddress);
+  }, [toAddress]);
 
   // ── Autocomplete ─────────────────────────────────────────────────────────
 
@@ -158,8 +164,8 @@ export default function DirectionsPanel({
 
           {/* Connector + swap button */}
           <View style={styles.connectorRow}>
-            <View style={styles.connectorDots} />
-            <TouchableOpacity onPress={onSwap} style={styles.swapButton} hitSlop={8}>
+            <View style={styles.connectorLine} />
+            <TouchableOpacity onPress={onSwap} style={styles.swapButton} hitSlop={8} activeOpacity={0.7}>
               <MaterialIcons name="swap-vert" size={20} color="#666" />
             </TouchableOpacity>
           </View>
@@ -261,10 +267,10 @@ const styles = StyleSheet.create({
   },
 
   fieldRow: {
-    flexDirection:  'row',
-    alignItems:     'center',
+    flexDirection:   'row',
+    alignItems:      'center',
     paddingVertical: 4,
-    gap:            10,
+    gap:             10,
   },
 
   dot: {
@@ -281,10 +287,10 @@ const styles = StyleSheet.create({
   },
 
   fieldInput: {
-    flex:       1,
-    fontSize:   14,
-    color:      '#1C1A18',
-    paddingVertical: 4,
+    flex:              1,
+    fontSize:          14,
+    color:             '#1C1A18',
+    paddingVertical:   4,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: 'rgba(0,0,0,0.08)',
   },
@@ -293,23 +299,25 @@ const styles = StyleSheet.create({
     marginLeft: 4,
   },
 
+  // Connector row: gives enough vertical room so the swap button isn't clipped
   connectorRow: {
-    flexDirection:  'row',
-    alignItems:     'center',
-    paddingLeft:    4,
-    height:         20,
+    flexDirection: 'row',
+    alignItems:    'center',
+    paddingLeft:   14,  // aligns with the center of the dot (10px) + gap (10px) - half-dot
+    minHeight:     28,
   },
-  connectorDots: {
+  connectorLine: {
     width:           2,
     flex:            1,
-    marginLeft:      4,
     borderLeftWidth: 2,
     borderLeftColor: 'rgba(0,0,0,0.12)',
     borderStyle:     'dashed',
   },
   swapButton: {
-    marginLeft: 'auto',
-    padding:    4,
+    padding:          6,
+    marginLeft:       8,
+    borderRadius:     999,
+    backgroundColor:  'rgba(0,0,0,0.04)',
   },
 
   dropdown: {
@@ -326,11 +334,11 @@ const styles = StyleSheet.create({
   },
 
   loadingRow: {
-    flexDirection:   'row',
-    alignItems:      'center',
+    flexDirection:     'row',
+    alignItems:        'center',
     paddingHorizontal: 16,
     paddingVertical:   16,
-    gap:             10,
+    gap:               10,
   },
   loadingText: {
     fontSize: 13,

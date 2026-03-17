@@ -6,6 +6,8 @@ import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Modal,
+  Pressable,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -38,6 +40,31 @@ interface RouteMetrics {
   businessesAvg:  number | null;
   routesCompared: number; // how many alternative routes were scored
 }
+
+// ── Metric info modal content ──────────────────────────────────────────────────
+
+const METRIC_INFO: Record<string, { title: string; description: string }> = {
+  'Iluminação': {
+    title: 'Iluminação Pública',
+    description:
+      'Indica a qualidade da iluminação pública ao longo da rota. Vias bem iluminadas aumentam a visibilidade e reduzem a sensação de insegurança — e o risco real. Pontuação média de 0 a 100 baseada em dados de infraestrutura municipal.',
+  },
+  'Negócios abertos': {
+    title: 'Negócios Abertos',
+    description:
+      'Comércios em funcionamento criam "olhos na rua": mais movimento, mais testemunhas e menos oportunidade para crimes. Exibimos a média de estabelecimentos abertos por trecho da rota, com base em horários de funcionamento.',
+  },
+  'Crime': {
+    title: 'Registros de Crime',
+    description:
+      'Total de ocorrências de roubo a transeuntes e assalto registradas nos últimos 90 dias ao longo da rota. Dados do ISP-RJ (Instituto de Segurança Pública do Rio de Janeiro).',
+  },
+  'Hora': {
+    title: 'Horário Atual',
+    description:
+      'O momento do dia influencia diretamente o risco. Dados do ISP-RJ indicam que ~38% dos roubos ocorrem entre 14h–19h e que o período noturno (19h–03h) concentra os maiores índices. O SalvaRota usa seu horário atual como fator de risco.',
+  },
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -118,6 +145,10 @@ export default function MapScreen() {
   const [metrics, setMetrics]               = useState<RouteMetrics | null>(null);
   const [isLoadingRoute, setIsLoadingRoute] = useState(false);
   const [routeError, setRouteError]         = useState(false);
+  const [metricModal, setMetricModal]       = useState<{ visible: boolean; key: string }>({
+    visible: false,
+    key: '',
+  });
 
   // ── Live location + reverse geocoding ────────────────────────────────────
   useEffect(() => {
@@ -158,6 +189,12 @@ export default function MapScreen() {
 
   // ── Destination picked from search ────────────────────────────────────────
   async function handlePlaceSelected(place: SelectedPlace) {
+    // Guard: validate coordinates before touching camera or map
+    if (!isFinite(place.lat) || !isFinite(place.lng)) {
+      console.warn('[Route] Invalid coordinates for place:', place);
+      return;
+    }
+
     setDestination(place);
     setFollowing(false);
     setRouteError(false);
@@ -244,6 +281,8 @@ export default function MapScreen() {
   }
 
   function handleSwap() {
+    // Guard: both must be set before swapping
+    if (!fromPlace || !destination) return;
     const prev = fromPlace;
     setFromPlace(destination);
     setDestination(prev);
@@ -273,6 +312,15 @@ export default function MapScreen() {
     setRouteError(false);
     setRouteCoords([]);
     setUiMode('idle');
+  }
+
+  // ── Metric modal ──────────────────────────────────────────────────────────
+  function openMetricModal(key: string) {
+    setMetricModal({ visible: true, key });
+  }
+
+  function closeMetricModal() {
+    setMetricModal({ visible: false, key: '' });
   }
 
   // ── Score display ─────────────────────────────────────────────────────────
@@ -406,23 +454,31 @@ export default function MapScreen() {
                 label="Iluminação"
                 value={metrics?.lightingAvg != null ? `${metrics.lightingAvg} / 100` : null}
                 color={metrics?.lightingAvg != null ? getScoreStyle(metrics.lightingAvg).color : '#BDBDBD'}
+                onPress={() => openMetricModal('Iluminação')}
               />
 
               <MetricRow
                 label="Negócios abertos"
                 value={metrics?.businessesAvg != null ? `${metrics.businessesAvg} por trecho` : null}
                 color={SCORE_AMBER}
+                onPress={() => openMetricModal('Negócios abertos')}
               />
 
               <MetricRow
                 label="Crime"
                 value={metrics != null ? `${metrics.crimeTotal} nos últimos 90d` : null}
                 color={metrics?.crimeTotal === 0 ? '#5BAD6F' : '#E05252'}
+                onPress={() => openMetricModal('Crime')}
               />
 
-              {/* Hora — device clock, always shown */}
+              {/* Hora — always shown, uses device clock */}
               {(() => { const t = getTimeInfo(); return (
-                <MetricRow label="Hora" value={t.value} color={t.color} />
+                <MetricRow
+                  label="Hora"
+                  value={t.value}
+                  color={t.color}
+                  onPress={() => openMetricModal('Hora')}
+                />
               ); })()}
 
             </View>
@@ -443,22 +499,60 @@ export default function MapScreen() {
         </BottomSheetView>
       </BottomSheet>
 
+      {/* Metric info modal */}
+      <Modal
+        visible={metricModal.visible}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={closeMetricModal}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={closeMetricModal}>
+          <Pressable style={styles.modalCard}>
+            <Text style={styles.modalTitle}>
+              {METRIC_INFO[metricModal.key]?.title ?? metricModal.key}
+            </Text>
+            <Text style={styles.modalDescription}>
+              {METRIC_INFO[metricModal.key]?.description}
+            </Text>
+            <TouchableOpacity
+              style={styles.modalOkBtn}
+              onPress={closeMetricModal}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.modalOkText}>Okay</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
     </GestureHandlerRootView>
   );
 }
 
 // ── MetricRow ─────────────────────────────────────────────────────────────────
 
-function MetricRow({ label, value, color }: { label: string; value: string | null; color: string }) {
+function MetricRow({
+  label,
+  value,
+  color,
+  onPress,
+}: {
+  label:   string;
+  value:   string | null;
+  color:   string;
+  onPress: () => void;
+}) {
   const noData = value === null;
   return (
-    <View style={styles.metricRow}>
+    <TouchableOpacity style={styles.metricRow} onPress={onPress} activeOpacity={0.6}>
       <View style={[styles.metricDot, { backgroundColor: noData ? '#BDBDBD' : color }]} />
       <Text style={styles.metricLabel}>{label}</Text>
       <Text style={[styles.metricValue, { color: noData ? '#BDBDBD' : color }]}>
         {noData ? '—' : value}
       </Text>
-    </View>
+      <MaterialIcons name="info-outline" size={14} color="rgba(0,0,0,0.28)" style={styles.metricInfoIcon} />
+    </TouchableOpacity>
   );
 }
 
@@ -565,6 +659,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    paddingVertical: 2,
   },
   metricDot: {
     width: 8,
@@ -581,6 +676,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
+  metricInfoIcon: {
+    marginLeft: 4,
+  },
+
   ctaButton: {
     marginTop: 20,
     paddingVertical: 12,
@@ -600,6 +699,49 @@ const styles = StyleSheet.create({
   ctaButtonText: {
     fontSize: 14,
     fontWeight: '600',
+    color: '#1C1A18',
+  },
+
+  // ── Modal ──────────────────────────────────────────────────────────────────
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+  },
+  modalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18,
+    shadowRadius: 20,
+    elevation: 12,
+  },
+  modalTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#1C1A18',
+  },
+  modalDescription: {
+    fontSize: 14,
+    color: 'rgba(0,0,0,0.65)',
+    lineHeight: 21,
+  },
+  modalOkBtn: {
+    marginTop: 4,
+    paddingVertical: 12,
+    borderRadius: 999,
+    backgroundColor: SCORE_AMBER,
+    alignItems: 'center',
+  },
+  modalOkText: {
+    fontSize: 15,
+    fontWeight: '700',
     color: '#1C1A18',
   },
 });
