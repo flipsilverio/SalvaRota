@@ -151,44 +151,54 @@ export interface SegmentInput {
 /**
  * Score a single route segment combining all available signals.
  *
- * Formula:
- *   segmentScore = (lightScore + timeScore + businessScore) / 3 − dangerPenalty
- *   clamped to [0, 100]
+ * Formula (weighted average minus crime penalty, clamped to [0, 100]):
+ *   segmentScore = lightScore×0.40 + timeScore×0.25 + businessScore×0.35 − dangerPenalty
  *
- * Light score:    100 during daylight; blended with backend lighting at night.
- * Time score:     From timeSafetyScore() bucket.
- * Business score: Open businesses reduce crime risk (Feature 10 penalty included).
- * Danger penalty: High crime incidents subtract points (Feature 11).
+ * Light score:    Backend infrastructure score adjusted for time of day.
+ *                 Daylight adds a bonus but never masks poor infrastructure.
+ * Time score:     From timeSafetyScore() bucket (weight reduced to 0.25).
+ * Business score: Open businesses reduce crime risk; capped at 90 so businesses
+ *                 alone cannot push a segment to green.
+ * Danger penalty: Applies from the first crime incident (1–2 → −8).
  */
 export function computeSegmentScore(params: SegmentInput): number {
-  const date = params.date ?? new Date();
+  const date      = params.date ?? new Date();
+  const isDay     = daylightScore(date) === 100;
 
-  // Light: if daytime → 100; if night → blend backend score with darkness penalty
-  const lightScore =
-    params.lightingScore !== null
-      ? (daylightScore(date) + params.lightingScore) / 2
-      : daylightScore(date);
+  // Light: respect the backend infrastructure score at all times.
+  // Daylight adds a modest +10; night applies a −25 penalty.
+  // Unknown lighting → conservative fallback.
+  let lightScore: number;
+  if (params.lightingScore !== null) {
+    lightScore = isDay
+      ? Math.min(100, params.lightingScore * 0.7 + 30)  // 75→83, 95→97
+      : Math.max(0,   params.lightingScore * 0.8 - 10); // 75→50, 40→22
+  } else {
+    lightScore = isDay ? 70 : 30;
+  }
 
   // Time bucket score
   const timeScore = timeSafetyScore(date);
 
-  // Business score (Feature 10 — penalise no-business areas)
+  // Business score — more granular scale, max 90 so it can't carry a route solo
   const biz = params.openBusinesses ?? 0;
   let businessScore: number;
-  if (biz === 0) businessScore = 40;       // no businesses → −10 to −20 effective
-  else if (biz === 1) businessScore = 60;
-  else if (biz === 2) businessScore = 80;
-  else businessScore = 100;               // 3+ businesses
+  if (biz === 0)      businessScore = 35;
+  else if (biz <= 2)  businessScore = 55;
+  else if (biz <= 5)  businessScore = 70;
+  else if (biz <= 10) businessScore = 82;
+  else                businessScore = 90; // 11+ businesses
 
-  // Crime danger penalty (Feature 11)
+  // Crime penalty — starts at 1 incident (previously ≤2 was free)
   const crime = params.crimeIncidents;
   let dangerPenalty: number;
-  if (crime > 10) dangerPenalty = 20;
-  else if (crime > 5) dangerPenalty = 15;
-  else if (crime > 2) dangerPenalty = 8;
-  else dangerPenalty = 0;
+  if (crime === 0)      dangerPenalty = 0;
+  else if (crime <= 2)  dangerPenalty = 8;
+  else if (crime <= 5)  dangerPenalty = 15;
+  else if (crime <= 10) dangerPenalty = 22;
+  else                  dangerPenalty = 32;
 
-  const raw = (lightScore + timeScore + businessScore) / 3 - dangerPenalty;
+  const raw = lightScore * 0.40 + timeScore * 0.25 + businessScore * 0.35 - dangerPenalty;
   return Math.max(0, Math.min(100, Math.round(raw)));
 }
 
