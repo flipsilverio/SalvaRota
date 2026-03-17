@@ -23,6 +23,8 @@ export interface SelectedPlace {
   lat:     number;
   lng:     number;
   address: string;
+  /** Business or POI name, if applicable (e.g. "Café XYZ") */
+  name?:   string;
 }
 
 interface Props {
@@ -91,6 +93,7 @@ export default function AddressSearch({ style, onPlaceSelected, onMenuPress, onC
         lat:     details.lat,
         lng:     details.lng,
         address: suggestion.description,
+        name:    details.name,
       });
     }
   }
