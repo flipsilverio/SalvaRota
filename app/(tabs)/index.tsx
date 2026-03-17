@@ -166,6 +166,30 @@ function buildRouteSegments(
   }));
 }
 
+async function fetchSafeRouteMetrics(
+  from: SelectedPlace,
+  to:   SelectedPlace,
+): Promise<RouteMetrics | null> {
+  const controller = new AbortController();
+  const timeoutId  = setTimeout(() => controller.abort(), 25_000);
+  try {
+    const url = `${API_URL}/safe-route?origin_lat=${from.lat}&origin_lng=${from.lng}&dest_lat=${to.lat}&dest_lng=${to.lng}`;
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return extractMetrics(data, data.recommended_route);
+  } catch (err: any) {
+    if (err?.name !== 'AbortError') {
+      const now = new Date();
+      const clientScore = Math.round((timeSafetyScore(now) + daylightScore(now)) / 2);
+      return { score: clientScore, crimeTotal: 0, lightingAvg: null, businessesAvg: null, routesCompared: 1 };
+    }
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function pickBestRoute(
   routes:          RouteResult[],
   backendMetrics?: RouteMetrics | null,
@@ -326,22 +350,27 @@ export default function MapScreen() {
     await fetchAndDisplayRoute(fromPlace, destination);
   }
 
-  async function fetchAndDisplayRoute(from: SelectedPlace, to: SelectedPlace) {
+  async function fetchAndDisplayRoute(
+    from:            SelectedPlace,
+    to:              SelectedPlace,
+    overrideMetrics?: RouteMetrics | null,
+  ) {
+    const effectiveMetrics = overrideMetrics !== undefined ? overrideMetrics : metrics;
     setIsLoadingRoute(true);
     const routes = await fetchWalkingRoutes(from, to);
     setIsLoadingRoute(false);
 
     if (!routes.length) { setRouteError(true); return; }
 
-    const { route, allUnsafe } = pickBestRoute(routes, metrics);
+    const { route, allUnsafe } = pickBestRoute(routes, effectiveMetrics);
     setAllRoutesUnsafe(allUnsafe);
     setRouteCoords(route.coordinates);
     setDurationText(route.durationText || null);
 
     const now = new Date();
-    if (metrics?.segments?.length) {
-      setRouteSegments(buildRouteSegments(route.coordinates, metrics.segments, now));
-      setRouteScore(metrics.score ?? undefined);
+    if (effectiveMetrics?.segments?.length) {
+      setRouteSegments(buildRouteSegments(route.coordinates, effectiveMetrics.segments, now));
+      setRouteScore(effectiveMetrics.score ?? undefined);
     } else {
       setRouteSegments([]);
       setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
@@ -361,12 +390,18 @@ export default function MapScreen() {
     if (fromPlace) await fetchAndDisplayRoute(fromPlace, place);
   }
 
-  function handleSwap() {
+  async function handleSwap() {
     if (!fromPlace || !destination) return;
-    const prev = fromPlace;
-    setFromPlace(destination);
-    setDestination(prev);
-    fetchAndDisplayRoute(destination, prev);
+    const newFrom = destination;
+    const newTo   = fromPlace;
+    setFromPlace(newFrom);
+    setDestination(newTo);
+    setRouteCoords([]);
+    setRouteSegments([]);
+    setRouteError(false);
+    const newMetrics = await fetchSafeRouteMetrics(newFrom, newTo);
+    setMetrics(newMetrics);
+    await fetchAndDisplayRoute(newFrom, newTo, newMetrics);
   }
 
   // ── Back / clear ──────────────────────────────────────────────────────────
