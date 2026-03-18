@@ -89,12 +89,18 @@ interface CrimeEvent {
 }
 
 interface ShootoutEvent {
-  lat:     number;
-  lng:     number;
-  date:    string;
-  time:    string;
-  killed:  number;
-  injured: number;
+  lat:           number;
+  lng:           number;
+  date:          string;
+  time:          string;
+  killed:        number;
+  injured:       number;
+  /** 'HIGH' | 'MEDIUM' | 'LOW' — internal, not shown directly in UI */
+  category?:     string;
+  /** UI-ready modal title — context-appropriate, non-alarming */
+  uiTitle?:      string;
+  /** UI-ready modal body — explains relevance to pedestrian safety */
+  uiDescription?: string;
 }
 
 // ── Metric info modal content ──────────────────────────────────────────────────
@@ -875,9 +881,12 @@ export default function MapScreen() {
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setShootoutModal({ visible: false, event: null })}>
           <Pressable style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Registro de Tiroteio</Text>
+            <Text style={styles.modalTitle}>
+              {shootoutModal.event?.uiTitle ?? 'Ocorrência registrada nas proximidades'}
+            </Text>
             <Text style={styles.modalDescription}>
-              Tiroteio registrado pelo Fogo Cruzado nas proximidades desta rota. Esse tipo de ocorrência envolve tipicamente confrontos armados entre facções ou com a polícia, e não representa risco direto de roubo a pedestres.
+              {shootoutModal.event?.uiDescription ??
+                'Tiroteio registrado pelo Fogo Cruzado nas proximidades desta rota.'}
             </Text>
             <View style={styles.crimeMetaRow}>
               <View style={styles.crimeMetaItem}>
