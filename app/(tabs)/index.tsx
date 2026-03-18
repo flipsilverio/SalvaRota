@@ -61,6 +61,8 @@ interface RouteMetrics {
   routesCompared: number;
   segments?:      BackendSegment[];
   crimeEvents?:   CrimeEvent[];
+  shootoutScore?:  number;
+  shootoutEvents?: ShootoutEvent[];
 }
 
 interface BackendSegment {
@@ -69,6 +71,8 @@ interface BackendSegment {
   open_businesses:  number | null;
   /** Individual crime records — added by backend when available */
   crimes?:          CrimeEvent[];
+  shootout_score?:  number;
+  shootout_events?: ShootoutEvent[];
 }
 
 /**
@@ -82,6 +86,21 @@ interface CrimeEvent {
   date:        string;
   time:        string;
   description: string;
+}
+
+interface ShootoutEvent {
+  lat:           number;
+  lng:           number;
+  date:          string;
+  time:          string;
+  killed:        number;
+  injured:       number;
+  /** 'HIGH' | 'MEDIUM' | 'LOW' — internal, not shown directly in UI */
+  category?:     string;
+  /** UI-ready modal title — context-appropriate, non-alarming */
+  uiTitle?:      string;
+  /** UI-ready modal body — explains relevance to pedestrian safety */
+  uiDescription?: string;
 }
 
 // ── Metric info modal content ──────────────────────────────────────────────────
@@ -106,6 +125,11 @@ const METRIC_INFO: Record<string, { title: string; description: string }> = {
     title: 'Horário Atual',
     description:
       'O momento do dia influencia diretamente o risco. Dados do ISP-RJ indicam que ~38% dos roubos ocorrem entre 14h–19h e que o período noturno (19h–03h) concentra os maiores índices. O SalvaRota usa seu horário atual como fator de risco.',
+  },
+  'Violência Recente': {
+    title: 'Violência Recente (Tiroteios)',
+    description:
+      'Registros de tiroteios nas proximidades da rota nos últimos 60 dias, com base em dados do Fogo Cruzado. Esta métrica é contextual — tiroteios envolvem principalmente confrontos entre policiais e criminosos ou disputas entre grupos, e NÃO representam risco direto de roubo. A pontuação é suavizada para não penalizar excessivamente rotas em regiões com histórico de conflito armado.',
   },
 };
 
@@ -158,6 +182,15 @@ function extractMetrics(data: any, recommendedId: number): RouteMetrics | null {
 
   const crimeEvents: CrimeEvent[] = segs.flatMap(s => s.crimes ?? []);
 
+  const shootoutEvents: ShootoutEvent[] = segs.flatMap(s => s.shootout_events ?? []);
+  // Deduplicate by lat+lng+date
+  const uniqueShootouts = shootoutEvents.filter((e, i, arr) =>
+    arr.findIndex(x => x.lat === e.lat && x.lng === e.lng && x.date === e.date) === i
+  );
+  // Route-level shootout score = average of segment shootout scores
+  const shootoutScores = segs.map(s => s.shootout_score ?? 100);
+  const shootoutScore = Math.round(shootoutScores.reduce((a, b) => a + b, 0) / shootoutScores.length);
+
   return {
     score:          finalScore,
     crimeTotal:     Math.round(crimeTotal),
@@ -166,6 +199,8 @@ function extractMetrics(data: any, recommendedId: number): RouteMetrics | null {
     routesCompared: data.routes?.length ?? 1,
     segments:       segs,
     crimeEvents,
+    shootoutScore,
+    shootoutEvents: uniqueShootouts,
   };
 }
 
@@ -255,6 +290,9 @@ export default function MapScreen() {
     visible: false,
     crime: null,
   });
+  const [shootoutEvents, setShootoutEvents]     = useState<ShootoutEvent[]>([]);
+  const [shootoutScore, setShootoutScore]       = useState<number | null>(null);
+  const [shootoutModal, setShootoutModal]       = useState<{ visible: boolean; event: ShootoutEvent | null }>({ visible: false, event: null });
 
   // Locate button floats 16 px above the bottom sheet at all times.
   const locateButtonStyle = useAnimatedStyle(() => ({
@@ -324,6 +362,8 @@ export default function MapScreen() {
     setRouteScore(undefined);
     setDurationText(null);
     setAllRoutesUnsafe(false);
+    setShootoutEvents([]);
+    setShootoutScore(null);
     setUiMode('place_selected');
 
     cameraRef.current?.setCamera({
@@ -419,6 +459,8 @@ export default function MapScreen() {
       setRouteSegments(buildRouteSegments(route.coordinates, effectiveMetrics.segments, now));
       setRouteScore(effectiveMetrics.score ?? undefined);
       setCrimeEvents(effectiveMetrics.crimeEvents ?? []);
+      setShootoutEvents(effectiveMetrics?.shootoutEvents ?? []);
+      setShootoutScore(effectiveMetrics?.shootoutScore ?? null);
     } else {
       setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
     }
@@ -453,6 +495,8 @@ export default function MapScreen() {
     setRouteScore(undefined);
     setDistanceText(null);
     setCrimeEvents([]);
+    setShootoutEvents([]);
+    setShootoutScore(null);
     setRouteError(false);
 
     // 3. Fire the backend safety re-fetch in parallel with Google directions.
@@ -480,6 +524,8 @@ export default function MapScreen() {
         setRouteSegments(buildRouteSegments(route.coordinates, m.segments, new Date()));
         setRouteScore(m.score ?? undefined);
         setCrimeEvents(m.crimeEvents ?? []);
+        setShootoutEvents(m.shootoutEvents ?? []);
+        setShootoutScore(m.shootoutScore ?? null);
         return;
       }
       if (m.score != null) { setRouteScore(m.score); return; }
@@ -497,6 +543,8 @@ export default function MapScreen() {
     setDurationText(null);
     setDistanceText(null);
     setCrimeEvents([]);
+    setShootoutEvents([]);
+    setShootoutScore(null);
   }
 
   function handleSearchClear() {
@@ -510,6 +558,8 @@ export default function MapScreen() {
     setDurationText(null);
     setDistanceText(null);
     setCrimeEvents([]);
+    setShootoutEvents([]);
+    setShootoutScore(null);
     setAllRoutesUnsafe(false);
     setUiMode('idle');
   }
@@ -584,6 +634,18 @@ export default function MapScreen() {
             onSelected={() => openCrimeModal(crime)}
           >
             <View style={styles.crimeDot} />
+          </MapLibreGL.PointAnnotation>
+        ))}
+
+        {/* Shootout dot pins — only shown when a route is active */}
+        {uiMode === 'directions' && shootoutEvents.map((evt, i) => (
+          <MapLibreGL.PointAnnotation
+            key={`shootout-${i}`}
+            id={`shootout-${i}`}
+            coordinate={[evt.lng, evt.lat]}
+            onSelected={() => setShootoutModal({ visible: true, event: evt })}
+          >
+            <View style={styles.shootoutDot} />
           </MapLibreGL.PointAnnotation>
         ))}
       </MapLibreGL.MapView>
@@ -724,6 +786,12 @@ export default function MapScreen() {
                 color={metrics?.crimeTotal === 0 ? '#5BAD6F' : '#E05252'}
                 onPress={() => openMetricModal('Crime')}
               />
+              <MetricRow
+                label="Violência Recente"
+                value={shootoutScore !== null ? `${shootoutScore} / 100` : null}
+                color={shootoutScore !== null ? scoreToColor(shootoutScore) : '#BDBDBD'}
+                onPress={() => openMetricModal('Violência Recente')}
+              />
               {(() => { const t = getTimeInfo(); return (
                 <MetricRow
                   label="Hora"
@@ -803,6 +871,60 @@ export default function MapScreen() {
         </Pressable>
       </Modal>
 
+      {/* Shootout event modal */}
+      <Modal
+        visible={shootoutModal.visible}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setShootoutModal({ visible: false, event: null })}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setShootoutModal({ visible: false, event: null })}>
+          <Pressable style={styles.modalCard}>
+            <Text style={styles.modalTitle}>
+              {shootoutModal.event?.uiTitle ?? 'Ocorrência registrada nas proximidades'}
+            </Text>
+            <Text style={styles.modalDescription}>
+              {shootoutModal.event?.uiDescription ??
+                'Tiroteio registrado pelo Fogo Cruzado nas proximidades desta rota.'}
+            </Text>
+            <View style={styles.crimeMetaRow}>
+              <View style={styles.crimeMetaItem}>
+                <MaterialIcons name="calendar-today" size={14} color="rgba(0,0,0,0.45)" />
+                <Text style={styles.crimeMetaText}>{shootoutModal.event?.date ?? '—'}</Text>
+              </View>
+              <View style={styles.crimeMetaItem}>
+                <MaterialIcons name="access-time" size={14} color="rgba(0,0,0,0.45)" />
+                <Text style={styles.crimeMetaText}>{shootoutModal.event?.time ?? '—'}</Text>
+              </View>
+            </View>
+            {((shootoutModal.event?.killed ?? 0) > 0 || (shootoutModal.event?.injured ?? 0) > 0) && (
+              <View style={styles.crimeMetaRow}>
+                {(shootoutModal.event?.killed ?? 0) > 0 && (
+                  <View style={styles.crimeMetaItem}>
+                    <MaterialIcons name="person-off" size={14} color="#E05252" />
+                    <Text style={[styles.crimeMetaText, { color: '#E05252' }]}>
+                      {shootoutModal.event?.killed} morto{(shootoutModal.event?.killed ?? 0) !== 1 ? 's' : ''}
+                    </Text>
+                  </View>
+                )}
+                {(shootoutModal.event?.injured ?? 0) > 0 && (
+                  <View style={styles.crimeMetaItem}>
+                    <MaterialIcons name="personal-injury" size={14} color="#E8A838" />
+                    <Text style={[styles.crimeMetaText, { color: '#E8A838' }]}>
+                      {shootoutModal.event?.injured} ferido{(shootoutModal.event?.injured ?? 0) !== 1 ? 's' : ''}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            )}
+            <TouchableOpacity style={styles.modalOkBtn} onPress={() => setShootoutModal({ visible: false, event: null })} activeOpacity={0.8}>
+              <Text style={styles.modalOkText}>Entendi</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* Paywall modal */}
       <Paywall
         visible={showPaywall}
@@ -851,6 +973,12 @@ const styles = StyleSheet.create({
   crimeDot: {
     width: 14, height: 14, borderRadius: 7,
     backgroundColor: '#E05252',
+    borderWidth: 2, borderColor: '#fff',
+  },
+
+  shootoutDot: {
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: '#E8A838',   // amber — distinct from crime red
     borderWidth: 2, borderColor: '#fff',
   },
 
