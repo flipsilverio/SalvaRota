@@ -69,6 +69,8 @@ interface BackendSegment {
   crime_incidents:  number;
   lighting_score:   number | null;
   open_businesses:  number | null;
+  /** Pre-computed by the backend using Phase III weights (ISP 45% + Shootout 15% + Env 25% + Hour 15%). */
+  segment_score?:   number;
   /** Individual crime records — added by backend when available */
   crimes?:          CrimeEvent[];
   shootout_score?:  number;
@@ -213,7 +215,9 @@ function buildRouteSegments(
   const parts = splitCoordinates(coords, segments.length);
   return parts.map((part, i) => ({
     coordinates: part,
-    score: computeSegmentScore({
+    // Prefer the backend's pre-computed score (Phase III: ISP+Shootout+Env+Hour).
+    // Fall back to client-side recalculation only when the backend field is absent.
+    score: segments[i].segment_score ?? computeSegmentScore({
       lightingScore:  segments[i].lighting_score  ?? null,
       openBusinesses: segments[i].open_businesses ?? null,
       crimeIncidents: segments[i].crime_incidents ?? 0,
@@ -279,6 +283,8 @@ export default function MapScreen() {
   const [distanceText, setDistanceText]         = useState<string | null>(null);
   const [crimeEvents, setCrimeEvents]           = useState<CrimeEvent[]>([]);
   const [metrics, setMetrics]                   = useState<RouteMetrics | null>(null);
+  // Cached area score for the user's current location — shown in idle mode.
+  const idleMetricsRef = useRef<RouteMetrics | null>(null);
   const [isLoadingRoute, setIsLoadingRoute]     = useState(false);
   const [routeError, setRouteError]             = useState(false);
   const [allRoutesUnsafe, setAllRoutesUnsafe]   = useState(false);
@@ -330,6 +336,20 @@ export default function MapScreen() {
 
       const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       await applyReverseGeocode(current.coords);
+
+      // Fetch area safety score for the user's current location so the idle
+      // bottom sheet shows real data rather than placeholder dashes.
+      // We use a small northward offset (~150 m) as the destination so the
+      // backend has enough geometry to score at least one segment.
+      const { latitude: lat, longitude: lng } = current.coords;
+      const areaFrom: SelectedPlace = { lat, lng, address: 'Localização atual' };
+      const areaTo:   SelectedPlace = { lat: lat + 0.0014, lng, address: '' };
+      fetchSafeRouteMetrics(areaFrom, areaTo).then((m) => {
+        if (m) {
+          idleMetricsRef.current = m;
+          setMetrics(m);
+        }
+      });
 
       subscriber = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.Balanced, distanceInterval: 20 },
@@ -416,27 +436,67 @@ export default function MapScreen() {
     const allowed = await requestRouteAccess();
     if (!allowed) return;
 
+    // Clear ALL stale data immediately — grey route until fresh data arrives.
     setRouteError(false);
     setRouteCoords([]);
     setRouteSegments([]);
+    setRouteScore(undefined);
     setDurationText(null);
+    setMetrics(null);
+    setCrimeEvents([]);
+    setShootoutEvents([]);
+    setShootoutScore(null);
     setAllRoutesUnsafe(false);
     setUiMode('directions');
     bottomSheetRef.current?.snapToIndex(1);
 
-    await fetchAndDisplayRoute(fromPlace, destination);
+    // 1. Fire the backend safety fetch in parallel — mirrors handleSwap pattern.
+    const safetyPromise = fetchSafeRouteMetrics(fromPlace, destination);
+
+    // 2. Fetch Google walking route (fast). Grey route appears here.
+    setIsLoadingRoute(true);
+    const routes = await fetchWalkingRoutes(fromPlace, destination);
+    setIsLoadingRoute(false);
+
+    if (!routes.length) { setRouteError(true); return; }
+
+    const { route, allUnsafe } = pickBestRoute(routes, null);
+    setAllRoutesUnsafe(allUnsafe);
+    setRouteCoords(route.coordinates);
+    setDurationText(route.durationText || null);
+    setDistanceText(route.distanceText || null);
+    cameraRef.current?.fitBounds(route.bounds.ne, route.bounds.sw, [80, 80, 280, 80], 800);
+
+    // 3. Once safety data arrives, paint the segment colours.
+    const m = await safetyPromise;
+    if (m) {
+      setMetrics(m);
+      if (m.segments?.length) {
+        setRouteSegments(buildRouteSegments(route.coordinates, m.segments, new Date()));
+        setRouteScore(m.score ?? undefined);
+        setCrimeEvents(m.crimeEvents ?? []);
+        setShootoutEvents(m.shootoutEvents ?? []);
+        setShootoutScore(m.shootoutScore ?? null);
+        return;
+      }
+      if (m.score != null) { setRouteScore(m.score); return; }
+    }
+    // Fallback: time-based score only
+    const now = new Date();
+    setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
   }
 
-  async function fetchAndDisplayRoute(
-    from:             SelectedPlace,
-    to:               SelectedPlace,
-    overrideMetrics?: RouteMetrics | null,
-  ) {
-    const effectiveMetrics = overrideMetrics !== undefined ? overrideMetrics : metrics;
-
-    // Clear stale segment colours immediately → grey route while loading
+  async function fetchAndDisplayRoute(from: SelectedPlace, to: SelectedPlace) {
+    // Always fetch fresh safety data in parallel with the Google route.
+    // Never reuse stale metrics from a previous direction.
     setRouteSegments([]);
     setRouteScore(undefined);
+    setMetrics(null);
+    setCrimeEvents([]);
+    setShootoutEvents([]);
+    setShootoutScore(null);
+
+    const safetyPromise = fetchSafeRouteMetrics(from, to);
 
     setIsLoadingRoute(true);
     const routes = await fetchWalkingRoutes(from, to);
@@ -444,26 +504,28 @@ export default function MapScreen() {
 
     if (!routes.length) { setRouteError(true); return; }
 
-    const { route, allUnsafe } = pickBestRoute(routes, effectiveMetrics);
+    const { route, allUnsafe } = pickBestRoute(routes, null);
     setAllRoutesUnsafe(allUnsafe);
     setRouteCoords(route.coordinates);
     setDurationText(route.durationText || null);
     setDistanceText(route.distanceText || null);
     cameraRef.current?.fitBounds(route.bounds.ne, route.bounds.sw, [80, 80, 280, 80], 800);
 
-    // Let the grey route render for one frame before painting safety colours.
-    await new Promise<void>(r => setTimeout(r, 50));
-
-    const now = new Date();
-    if (effectiveMetrics?.segments?.length) {
-      setRouteSegments(buildRouteSegments(route.coordinates, effectiveMetrics.segments, now));
-      setRouteScore(effectiveMetrics.score ?? undefined);
-      setCrimeEvents(effectiveMetrics.crimeEvents ?? []);
-      setShootoutEvents(effectiveMetrics?.shootoutEvents ?? []);
-      setShootoutScore(effectiveMetrics?.shootoutScore ?? null);
-    } else {
-      setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
+    const m = await safetyPromise;
+    if (m) {
+      setMetrics(m);
+      if (m.segments?.length) {
+        setRouteSegments(buildRouteSegments(route.coordinates, m.segments, new Date()));
+        setRouteScore(m.score ?? undefined);
+        setCrimeEvents(m.crimeEvents ?? []);
+        setShootoutEvents(m.shootoutEvents ?? []);
+        setShootoutScore(m.shootoutScore ?? null);
+        return;
+      }
+      if (m.score != null) { setRouteScore(m.score); return; }
     }
+    const now = new Date();
+    setRouteScore(Math.round((timeSafetyScore(now) + daylightScore(now)) / 2));
   }
 
   // ── DirectionsPanel callbacks ─────────────────────────────────────────────
@@ -550,7 +612,8 @@ export default function MapScreen() {
   function handleSearchClear() {
     setDestination(null);
     setFromPlace(null);
-    setMetrics(null);
+    // Restore the cached area score so idle mode keeps showing real data.
+    setMetrics(idleMetricsRef.current);
     setRouteError(false);
     setRouteCoords([]);
     setRouteSegments([]);
