@@ -16,12 +16,116 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
+import Svg, {
+  Circle,
+  Rect,
+  Path,
+  Line,
+  Defs,
+  RadialGradient,
+  LinearGradient,
+  Stop,
+} from 'react-native-svg';
 
 import AnimatedGradient from '@/components/AnimatedGradient';
 
 const { width, height } = Dimensions.get('window');
 
 const BG_IMAGE = 'https://www.figma.com/api/mcp/asset/2362da91-7214-4d07-82b4-0c2f0074bd44';
+
+// ── SVG Icons ─────────────────────────────────────────────────────────────────
+
+function LocationOnIcon() {
+  return (
+    <Svg width={132} height={153} viewBox="0 0 132 153" fill="none">
+      <Defs>
+        <RadialGradient
+          id="loc_on_radial"
+          cx="50%"
+          cy="57%"
+          r="50%"
+          gradientUnits="userSpaceOnUse"
+        >
+          <Stop offset="0" stopColor="#5FB645" stopOpacity="1" />
+          <Stop offset="0.730769" stopColor="#5FB645" stopOpacity="0" />
+        </RadialGradient>
+        <LinearGradient
+          id="loc_on_linear"
+          x1="66.0001"
+          y1="90.0001"
+          x2="66.0001"
+          y2="-5.618"
+          gradientUnits="userSpaceOnUse"
+        >
+          <Stop offset="0" stopColor="#5FB645" stopOpacity="1" />
+          <Stop offset="0.730769" stopColor="#5FB645" stopOpacity="0" />
+        </LinearGradient>
+      </Defs>
+      {/* Radial glow */}
+      <Circle cx={66} cy={87} r={66} fill="url(#loc_on_radial)" />
+      {/* Diamond */}
+      <Rect
+        x={44.8787}
+        y={85.9999}
+        width={29.87}
+        height={29.87}
+        transform="rotate(-45 44.8787 85.9999)"
+        fill="#D9D9D9"
+        stroke="#5FB645"
+        strokeWidth={3}
+      />
+      {/* Upward beam */}
+      <Path
+        d="M46 20.0001H86.0001L66.0001 90.0001L46 20.0001Z"
+        fill="url(#loc_on_linear)"
+      />
+    </Svg>
+  );
+}
+
+function LocationOffIcon() {
+  return (
+    <Svg width={132} height={153} viewBox="0 0 132 153" fill="none">
+      <Defs>
+        <RadialGradient
+          id="loc_off_radial"
+          cx="50%"
+          cy="57%"
+          r="50%"
+          gradientUnits="userSpaceOnUse"
+        >
+          <Stop offset="0" stopColor="#342E28" stopOpacity="1" />
+          <Stop offset="0.730769" stopColor="#33302C" stopOpacity="0" />
+        </RadialGradient>
+      </Defs>
+      {/* Subtle dark glow */}
+      <Circle cx={66} cy={87} r={66} fill="url(#loc_off_radial)" />
+      {/* Diamond — faded */}
+      <Rect
+        x={44.8787}
+        y={85.9999}
+        width={29.87}
+        height={29.87}
+        transform="rotate(-45 44.8787 85.9999)"
+        fill="#D9D9D9"
+        fillOpacity={0.3}
+        stroke="#342E28"
+        strokeWidth={3}
+      />
+      {/* Diagonal strikethrough */}
+      <Line
+        x1={21.7071}
+        y1={42.7929}
+        x2={111.707}
+        y2={132.793}
+        stroke="#33302C"
+        strokeWidth={2}
+      />
+    </Svg>
+  );
+}
+
+// ── Types ──────────────────────────────────────────────────────────────────────
 
 type Step = {
   id: string;
@@ -30,6 +134,8 @@ type Step = {
   body?: string;
   buttonLabel: string;
   content?: 'dataSources' | 'warnings';
+  /** Which icon to show in the upper zone (location steps only) */
+  icon?: 'on' | 'off';
 };
 
 const STEPS: Step[] = [
@@ -44,12 +150,14 @@ const STEPS: Step[] = [
     title: 'Vamos precisar de\nsaber onde você está',
     body: 'Para calcular a rota mais segura, precisamos da sua localização em tempo real. Seus dados são usados apenas durante a navegação e nunca são compartilhados.',
     buttonLabel: 'C O N T I N U A R',
+    icon: 'off',
   },
   {
     id: 'location-permission',
     title: 'Permitir acesso\nà localização',
     body: 'Toque em "Permitir" na próxima tela. Usamos sua localização apenas enquanto você navega pelo app.',
     buttonLabel: 'ATIVAR\nLOCALIZAÇÃO',
+    icon: 'on',
   },
   {
     id: 'data-sources',
@@ -157,7 +265,7 @@ export default function OnboardingScreen() {
         </ImageBackground>
       </Animated.View>
 
-      {/* Sliding content only */}
+      {/* Sliding content */}
       <Animated.ScrollView
         ref={scrollRef as any}
         horizontal
@@ -172,48 +280,24 @@ export default function OnboardingScreen() {
       >
         {STEPS.map((item) => (
           <View key={item.id} style={styles.page}>
-            <SafeAreaView style={styles.safeArea}>
-
-              {item.id === 'splash' ? (
-                <View style={styles.splashTitleBlock}>
-                  <Text style={styles.splashTitle}>{item.title}</Text>
-                  <Text style={styles.splashRegistered}>®</Text>
+            {item.icon ? (
+              /* ── Location steps: icon top · text middle · footer bottom ── */
+              <SafeAreaView style={styles.safeAreaLocation}>
+                {/* Upper zone: icon centred */}
+                <View style={styles.iconZone}>
+                  {item.icon === 'on' ? <LocationOnIcon /> : <LocationOffIcon />}
                 </View>
-              ) : (
-                <Text style={styles.title}>{item.title}</Text>
-              )}
 
-              {item.subtitle ? (
-                <Text style={styles.body}>{item.subtitle}</Text>
-              ) : item.body ? (
-                <Text style={[styles.body, item.id === 'splash' && styles.bodyRight]}>{item.body}</Text>
-              ) : null}
-
-              {item.content === 'dataSources' && (
-                <View style={styles.cardsBlock}>
-                  {DATA_SOURCES.map((ds) => (
-                    <DataSourceCard key={ds.label} {...ds} />
-                  ))}
+                {/* Middle zone: title + body */}
+                <View style={styles.textZone}>
+                  <Text style={styles.title}>{item.title}</Text>
+                  {item.body ? (
+                    <Text style={styles.body}>{item.body}</Text>
+                  ) : null}
                 </View>
-              )}
 
-              {item.content === 'warnings' && (
-                <View style={styles.cardsBlock}>
-                  <WarningCard
-                    emoji="warning-amber"
-                    bold="Atenção: "
-                    text="O SalvaRota oferece orientações baseadas em dados, mas não garante sua segurança em nenhuma circunstância. Use o bom senso sempre."
-                  />
-                  <WarningCard
-                    emoji="directions-walk"
-                    bold="Dica importante: "
-                    text="Evite andar com o celular na mão. A maioria dos roubos acontece quando o aparelho está visível. Consulte a rota antes de sair, guarde o celular e siga em frente."
-                  />
-                </View>
-              )}
-
-              <View style={styles.footer}>
-                {item.id !== 'splash' && (
+                {/* Footer: dots + button */}
+                <View style={styles.footer}>
                   <View style={styles.dots}>
                     {STEPS.slice(1).map((_, i) => (
                       <TouchableOpacity key={i} onPress={handleDotPress} hitSlop={10}>
@@ -221,17 +305,76 @@ export default function OnboardingScreen() {
                       </TouchableOpacity>
                     ))}
                   </View>
+                  <TouchableOpacity
+                    onPress={() => handleNext(item)}
+                    style={styles.button}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.buttonText}>{item.buttonLabel}</Text>
+                  </TouchableOpacity>
+                </View>
+              </SafeAreaView>
+            ) : (
+              /* ── Other steps: original bottom-anchored layout ── */
+              <SafeAreaView style={styles.safeArea}>
+                {item.id === 'splash' ? (
+                  <View style={styles.splashTitleBlock}>
+                    <Text style={styles.splashTitle}>{item.title}</Text>
+                    <Text style={styles.splashRegistered}>®</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.title}>{item.title}</Text>
                 )}
-                <TouchableOpacity
-                  onPress={() => handleNext(item)}
-                  style={styles.button}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.buttonText}>{item.buttonLabel}</Text>
-                </TouchableOpacity>
-              </View>
 
-            </SafeAreaView>
+                {item.subtitle ? (
+                  <Text style={styles.body}>{item.subtitle}</Text>
+                ) : item.body ? (
+                  <Text style={[styles.body, item.id === 'splash' && styles.bodyRight]}>{item.body}</Text>
+                ) : null}
+
+                {item.content === 'dataSources' && (
+                  <View style={styles.cardsBlock}>
+                    {DATA_SOURCES.map((ds) => (
+                      <DataSourceCard key={ds.label} {...ds} />
+                    ))}
+                  </View>
+                )}
+
+                {item.content === 'warnings' && (
+                  <View style={styles.cardsBlock}>
+                    <WarningCard
+                      emoji="warning-amber"
+                      bold="Atenção: "
+                      text="O SalvaRota oferece orientações baseadas em dados, mas não garante sua segurança em nenhuma circunstância. Use o bom senso sempre."
+                    />
+                    <WarningCard
+                      emoji="directions-walk"
+                      bold="Dica importante: "
+                      text="Evite andar com o celular na mão. A maioria dos roubos acontece quando o aparelho está visível. Consulte a rota antes de sair, guarde o celular e siga em frente."
+                    />
+                  </View>
+                )}
+
+                <View style={styles.footer}>
+                  {item.id !== 'splash' && (
+                    <View style={styles.dots}>
+                      {STEPS.slice(1).map((_, i) => (
+                        <TouchableOpacity key={i} onPress={handleDotPress} hitSlop={10}>
+                          <View style={[styles.dot, i === currentIndex - 1 && styles.dotActive]} />
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
+                  <TouchableOpacity
+                    onPress={() => handleNext(item)}
+                    style={styles.button}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.buttonText}>{item.buttonLabel}</Text>
+                  </TouchableOpacity>
+                </View>
+              </SafeAreaView>
+            )}
           </View>
         ))}
       </Animated.ScrollView>
@@ -252,6 +395,24 @@ const styles = StyleSheet.create({
     width,
     height,
   },
+
+  // ── Location step layout (3-zone) ──────────────────────────────────────────
+  safeAreaLocation: {
+    flex: 1,
+    paddingHorizontal: 40,
+    paddingBottom: 40,
+  },
+  iconZone: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  textZone: {
+    alignItems: 'center',
+    paddingBottom: 32,
+  },
+
+  // ── Other steps layout (bottom-anchored) ───────────────────────────────────
   safeArea: {
     flex: 1,
     justifyContent: 'flex-end',
